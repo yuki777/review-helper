@@ -1,0 +1,14 @@
+{
+  "name": "review-helper-marketplace",
+  "description": "AIが生成した差分の「解説つきレビュー画面」ジェネレータ review-helper の配布用マーケットプレイス",
+  "owner": {
+    "name": "yuki777"
+  },
+  "plugins": [
+    {
+      "name": "review-helper",
+      "source": "./",
+      "description": "AIが生成した大きな差分のための「解説つきレビュー画面」ジェネレータ"
+    }
+  ]
+}

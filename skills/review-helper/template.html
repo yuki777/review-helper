@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DIFF REVIEW</title>
+<style>
+  :root {
+    --border: #dde1e6; --txt: #1f2328; --muted: #61686f; --bg: #f4f5f7; --card: #fff;
+    --green: #1a7f37; --red: #d1242f; --add-bg: #e6ffec; --del-bg: #ffebe9;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt); font-size: 14px; line-height: 1.6;
+         font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  button { font-family: inherit; }
+
+  .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 14px;
+            padding: 10px 20px; background: #fff; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .brand { font-family: var(--mono); font-size: 12px; letter-spacing: .15em; color: var(--muted); }
+  .title { font-weight: 700; font-size: 15px; flex: 1; min-width: 220px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border);
+          border-radius: 6px; padding: 2px 8px; font-size: 12px; background: #fff; color: var(--muted); white-space: nowrap; }
+  .chip.stats { font-family: var(--mono); }
+  .add { color: var(--green); font-weight: 600; }
+  .del { color: var(--red); font-weight: 600; }
+  .progress { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .bar { width: 140px; height: 6px; border-radius: 3px; background: #e7e9ec; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--green); transition: width .2s; }
+  .copybtn { border: 1px solid var(--border); background: #fff; border-radius: 6px; padding: 5px 10px;
+             font-size: 12px; cursor: pointer; }
+  .copybtn:disabled { opacity: .45; cursor: default; }
+
+  .source { overflow-wrap: anywhere; }
+  .summary { color: var(--txt); font-size: 13px; margin: 6px 0 0; }
+
+  .sec { max-width: 980px; margin: 22px auto; padding: 0 20px; }
+  .sec h2 { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .12em; margin: 0 0 10px; }
+
+  .glist { display: flex; flex-direction: column; gap: 8px; }
+  .grow { display: flex; gap: 12px; align-items: center; background: var(--card); border: 1px solid var(--border);
+          border-left: 4px solid #8b949e; border-radius: 8px; padding: 10px 14px; text-decoration: none; color: inherit; }
+  .grow:hover { border-color: #b6bcc4; }
+  .risk-high { border-left-color: var(--red) !important; }
+  .risk-medium { border-left-color: #bf8700 !important; }
+  .risk-low { border-left-color: #8b949e !important; }
+  .grow-main { flex: 1; min-width: 0; }
+  .grow-title { font-weight: 700; display: flex; gap: 6px; align-items: center; }
+  .okmark { color: var(--green); visibility: hidden; font-weight: 700; }
+  .grow.approved .okmark { visibility: visible; }
+  .grow-sum { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grow-side { display: flex; gap: 6px; align-items: center; }
+  .chip.risk.high { background: #ffebe9; border-color: #ffcecb; color: var(--red); font-weight: 600; }
+  .chip.risk.medium { background: #fff8c5; border-color: #eed888; color: #7d5e00; font-weight: 600; }
+  .chip.risk.low { background: #f0f1f3; color: #59636e; }
+  .chip.find { background: #fff1f0; border-color: #ffd4d1; color: var(--red); font-weight: 600; }
+  .chip.kind { background: #f6f8fa; }
+
+  .gcard { background: var(--card); border: 1px solid var(--border); border-left: 4px solid #8b949e;
+           border-radius: 10px; margin-bottom: 18px; scroll-margin-top: 70px; overflow: hidden; }
+  .gcard.approved { outline: 2px solid #b6e3c6; }
+  .ghead { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 16px 4px; }
+  .ghead-l { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ghead h3 { margin: 0; font-size: 15px; }
+  .approve { display: flex; gap: 6px; align-items: center; font-size: 13px; border: 1px solid var(--border);
+             border-radius: 8px; padding: 6px 12px; cursor: pointer; background: #fff; white-space: nowrap; }
+  .gcard.approved .approve { background: #ecf7ef; border-color: #b6e3c6; color: var(--green); font-weight: 600; }
+  .gmeta { display: flex; gap: 6px; padding: 8px 16px 0; flex-wrap: wrap; }
+  .intent { padding: 0 16px; margin: 10px 0 8px; }
+  .intent b { color: var(--green); }
+  .notes { margin: 0 0 12px; padding: 0 16px 0 36px; color: var(--muted); font-size: 13px; }
+
+  .fblock { border-top: 1px solid var(--border); }
+  .fbar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; background: #fafbfc;
+          font-family: var(--mono); font-size: 12px; font-weight: 600; flex-wrap: wrap; }
+  .fold { color: var(--muted); font-weight: 400; }
+  .hunk { border-top: 1px dashed var(--border); }
+  .hbar { display: flex; gap: 10px; align-items: center; padding: 6px 16px; font-family: var(--mono);
+          font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .hid { font-weight: 700; }
+  .hhdr { color: #0969da; }
+  details.hunk > summary { cursor: pointer; list-style: none; }
+  details.hunk > summary::-webkit-details-marker { display: none; }
+
+  table.diff { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+  table.diff td { padding: 0 8px; vertical-align: top; }
+  td.n { width: 1%; min-width: 36px; text-align: right; color: #8b949e; background: #fafbfc;
+         border-right: 1px solid #eef0f2; user-select: none; }
+  td.m { width: 1%; color: var(--muted); user-select: none; }
+  td.c { white-space: pre-wrap; word-break: break-all; }
+  tr.add { background: var(--add-bg); } tr.add td.n { background: #d7f5df; }
+  tr.del { background: var(--del-bg); } tr.del td.n { background: #ffd7d5; }
+  tr.meta td { color: #8b949e; font-style: italic; }
+  .hempty { padding: 8px 16px; color: var(--muted); font-size: 12px; font-style: italic; }
+
+  .finding { display: flex; gap: 8px; align-items: flex-start; margin: 8px 16px; padding: 8px 12px;
+             border: 1px solid #ffd4d1; border-left: 3px solid var(--red); border-radius: 6px;
+             background: #fff8f8; font-size: 13px; }
+  .memoarea { padding: 6px 16px 12px; }
+  .memobtn { border: 1px dashed var(--border); background: #fff; border-radius: 6px; padding: 3px 10px;
+             font-size: 12px; color: var(--muted); cursor: pointer; }
+  .memowrap textarea { width: 100%; margin-top: 6px; min-height: 64px; border: 1px solid var(--border);
+                       border-radius: 6px; padding: 8px; font: inherit; font-size: 13px; }
+  .spacer { flex: 1; }
+  td.n.sel { cursor: pointer; }
+  td.n.sel:hover { background: #cfe3ff !important; }
+  tr.selecting td { background: #dbe9ff !important; }
+  tr.lcmark td:first-child { box-shadow: inset 3px 0 0 #0969da; }
+  tr.crow > td { padding: 6px 16px; background: #f6f9ff; }
+  .linecomment { border: 1px solid #b6d3f5; border-left: 3px solid #0969da; border-radius: 6px;
+                 background: #fff; padding: 8px 12px; }
+  .lc-head { display: flex; gap: 8px; align-items: center; font-family: var(--mono); font-size: 12px;
+             color: var(--muted); margin-bottom: 6px; }
+  .lc-head .memobtn { margin-left: auto; }
+  .linecomment textarea { width: 100%; min-height: 56px; border: 1px solid var(--border); border-radius: 6px;
+                          padding: 6px 8px; font: inherit; font-size: 13px; }
+  .chip.line { background: #eef5ff; border-color: #b6d3f5; color: #0969da; font-weight: 600; }
+  .ctxcard { padding: 14px 16px; }
+  .context-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+  .ctxcard > .context-memo { padding: 8px 0 0; }
+  .ctx-h { font-size: 14px; font-weight: 700; color: var(--txt); margin: 14px 0 6px; }
+  .ctxcard > div:first-child > .ctx-h { margin-top: 0; }
+  .ctx-bg { margin: 0 0 4px; }
+  .term { display: flex; gap: 8px; align-items: baseline; margin: 3px 0; font-size: 13px; }
+  .ctx-link { display: block; color: #0969da; font-size: 13px; text-decoration: none; margin: 2px 0; }
+  .ctx-link:hover { text-decoration: underline; }
+  footer { max-width: 980px; margin: 30px auto; padding: 0 20px; color: #98a1a8; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="application/json" id="review-data">__REVIEW_DATA__</script>
+<script>
+"use strict";
+(function () {
+  // データはCLIが `<` を \u003c にエスケープ済み。描画は必ずtextContent経由（innerHTMLは使わない）
+  const data = JSON.parse(document.getElementById("review-data").textContent);
+  const diff = data.diff;
+  const anno = data.annotations;
+  const LS_KEY = "review-helper:" + data.stateKey;
+  // http(s)配信時のみ「エージェントに送信」ボタンを出す（file://ではコピーのみ）
+  const SERVED = location.protocol === "http:" || location.protocol === "https:";
+
+  // ---------- 状態（承認・メモ）: diff内容のハッシュをキーにlocalStorageへ ----------
+  let state = { approved: {}, memos: {}, lines: {}, contextMemo: "" };
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) {
+      const s = JSON.parse(raw);
+      state = {
+        approved: s.approved || {},
+        memos: s.memos || {},
+        lines: s.lines || {},
+        contextMemo: typeof s.contextMemo === "string" ? s.contextMemo : "",
+      };
+    }
+  } catch (e) { /* localStorage不可でも閲覧は継続 */ }
+  function saveState() {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) { /* noop */ }
+  }
+
+  const RISK = {
+    high: { label: "要注意" },
+    medium: { label: "注意" },
+    low: { label: "低リスク" },
+  };
+  const KIND = {
+    feature: "機能追加", fix: "バグ修正", refactor: "リファクタ", test: "テスト",
+    docs: "ドキュメント", config: "設定", chore: "雑務", other: "その他",
+  };
+  const STATUS = { added: "新規", deleted: "削除", renamed: "リネーム", modified: "" };
+
+  // ---------- DOMヘルパー: 動的な文字列はすべてテキストノードとして挿入する ----------
+  function h(tag, attrs) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v == null) continue;
+      if (k === "class") e.className = v;
+      else if (k === "dataset") Object.assign(e.dataset, v);
+      else if (k === "checked") e.checked = !!v;
+      else if (k === "hidden") e.hidden = !!v;
+      else if (k === "disabled") e.disabled = !!v;
+      else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v);
+    }
+    for (let i = 2; i < arguments.length; i++) {
+      const kids = Array.isArray(arguments[i]) ? arguments[i] : [arguments[i]];
+      for (const c of kids.flat(9)) {
+        if (c == null) continue;
+        e.append(c.nodeType ? c : document.createTextNode(String(c)));
+      }
+    }
+    return e;
+  }
+
+  // ---------- ビューモデル ----------
+  const hunkIndex = new Map(); // id -> { file, hunk }
+  for (const f of diff.files) for (const hk of f.hunks) hunkIndex.set(hk.id, { file: f, hunk: hk });
+
+  const groups = anno.groups.map(function (g, i) {
+    const ids = g.hunks.slice().sort();
+    let add = 0, del = 0;
+    const byFile = new Map(); // path -> { file, hunks[] }
+    for (const id of ids) {
+      const e = hunkIndex.get(id);
+      if (!e) continue;
+      for (const l of e.hunk.lines) {
+        if (l[0] === "+") add++;
+        else if (l[0] === "-") del++;
+      }
+      if (!byFile.has(e.file.path)) byFile.set(e.file.path, { file: e.file, hunks: [] });
+      byFile.get(e.file.path).hunks.push(e.hunk);
+    }
+    return { i: i, g: g, ids: ids, add: add, del: del, byFile: byFile,
+             findings: g.findings || [], notes: g.notes || [] };
+  });
+
+  // ---------- 指摘コピー ----------
+  function collectMemos() {
+    const items = [];
+    const contextMemo = (state.contextMemo || "").trim();
+    if (contextMemo) items.push({ scope: "context", memo: contextMemo });
+    for (const gv of groups) {
+      for (const id of gv.ids) {
+        const m = (state.memos[id] || "").trim();
+        const e = hunkIndex.get(id);
+        if (!e) continue;
+        if (m) items.push({ scope: "hunk", id: id, memo: m, gv: gv, e: e, lines: null });
+        for (const c of state.lines[id] || []) {
+          if ((c.text || "").trim()) {
+            items.push({ scope: "hunk", id: id, memo: c.text.trim(), gv: gv, e: e, lines: c });
+          }
+        }
+      }
+    }
+    return items;
+  }
+  function buildPrompt(items) {
+    const L = [];
+    L.push("以下はコードレビューでの質問・指摘です。質問には回答し、指摘には対応して、それぞれの結果を簡潔に報告してください。", "");
+    items.forEach(function (it, idx) {
+      if (it.scope === "context") {
+        const c = anno.context || {};
+        L.push("## 質問/指摘 " + (idx + 1) + ": 背景・コンテキスト / レビュー全体");
+        L.push("レビュータイトル: " + anno.title);
+        L.push("対象: " + diff.rangeLabel);
+        L.push(diff.prRef ? "PR: " + diff.prRef : "ローカルPath: " + diff.repoRoot);
+        if (anno.summary) L.push("概要: " + anno.summary);
+        if (c.background) L.push("背景: " + c.background);
+        if (c.requestedBy) L.push("要望元: " + c.requestedBy);
+        if (Array.isArray(c.terms) && c.terms.length) {
+          L.push("用語: " + c.terms.map(function (t) { return t.term + "=" + t.desc; }).join(" / "));
+        }
+        if (Array.isArray(c.links) && c.links.length) {
+          L.push("関連リンク: " + c.links.map(function (l) {
+            return (l.label ? l.label + " " : "") + l.url;
+          }).join(" / "));
+        }
+        L.push("内容: " + it.memo, "");
+        return;
+      }
+      const label = it.lines ? ":" + lineLabel(it.e.hunk, it.lines.from, it.lines.to) : "";
+      L.push("## 質問/指摘 " + (idx + 1) + ": " + it.e.file.path + label + "（hunk " + it.id + " / " + it.e.hunk.header.trim() + "）");
+      L.push("変更グループ: " + it.gv.g.title);
+      const src = it.lines ? it.e.hunk.lines.slice(it.lines.from, it.lines.to + 1) : it.e.hunk.lines.slice(0, 30);
+      const body = src.map(function (l) {
+        return l[0] === "\\" ? "\\ No newline at end of file" : l[0] + l[1];
+      });
+      if (body.length) {
+        L.push("```diff");
+        L.push.apply(L, body);
+        if (!it.lines && it.e.hunk.lines.length > 30) L.push("(以下 " + (it.e.hunk.lines.length - 30) + " 行省略)");
+        L.push("```");
+      }
+      L.push("内容: " + it.memo, "");
+    });
+    return L.join("\n");
+  }
+  function updateCopyBtn() {
+    const n = collectMemos().length;
+    const btn = document.getElementById("copybtn");
+    btn.textContent = "質問/指摘をコピー（" + n + "件）";
+    btn.disabled = n === 0;
+    const sb = document.getElementById("sendbtn");
+    if (sb) {
+      sb.textContent = "質問/指摘を送信（" + n + "件）";
+      sb.disabled = n === 0;
+    }
+  }
+  async function copyMemos() {
+    const items = collectMemos();
+    if (!items.length) return;
+    const text = buildPrompt(items);
+    window.__lastReviewPrompt = text; // 動作確認用フック
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      const ta = h("textarea", {});
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    const btn = document.getElementById("copybtn");
+    btn.textContent = "コピーしました";
+    setTimeout(updateCopyBtn, 1200);
+  }
+
+  async function sendMemos() {
+    const items = collectMemos();
+    if (!items.length) return;
+    const sb = document.getElementById("sendbtn");
+    if (sb.disabled) return;
+    sb.disabled = true; // fetch前に無効化（二重送信ガード）
+    sb.textContent = "送信中…";
+    const payload = {
+      sentAt: new Date().toISOString(),
+      stateKey: data.stateKey,
+      title: anno.title,
+      prompt: buildPrompt(items),
+      items: items.map(function (it) {
+        if (it.scope === "context") {
+          return {
+            scope: "context",
+            section: "背景・コンテキスト / レビュー全体",
+            memo: it.memo,
+          };
+        }
+        return {
+          scope: "hunk",
+          hunk: it.id,
+          file: it.e.file.path,
+          header: it.e.hunk.header.trim(),
+          group: it.gv.g.title,
+          lines: it.lines ? lineLabel(it.e.hunk, it.lines.from, it.lines.to) : null,
+          memo: it.memo,
+        };
+      }),
+    };
+    try {
+      const r = await fetch("/api/comments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (r.status === 409) {
+        const err = await r.json().catch(function () { return {}; });
+        sb.textContent = err.error === "stale-state"
+          ? "画面が古い差分です（ページをリロードしてください）"
+          : "受理済み（再送は拒否されました）";
+      } else if (!r.ok) {
+        throw new Error("HTTP " + r.status);
+      } else {
+        sb.textContent = "送信しました（受信箱に保存）";
+        document.getElementById("pathbtn").hidden = false;
+      }
+    } catch (e) {
+      sb.textContent = "送信失敗（serve実行中か確認）";
+    }
+    setTimeout(updateCopyBtn, 1600);
+  }
+
+  function generatedAtLabel(value) {
+    const date = new Date(value);
+    const offsetMinutes = -date.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? "+" : "-";
+    const hours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0");
+    const minutes = String(Math.abs(offsetMinutes) % 60).padStart(2, "0");
+    return date.toLocaleString("ja-JP") + "（UTC" + sign + hours + ":" + minutes + "）";
+  }
+
+  function contextMemoParts() {
+    const ta = h("textarea", {
+      placeholder: "背景・目的・レビュー全体への質問/指摘（例: この機能やPRは本当に必要ですか？）",
+      oninput: function (ev) {
+        state.contextMemo = ev.target.value;
+        saveState();
+        updateCopyBtn();
+      },
+    });
+    ta.value = state.contextMemo || "";
+    const wrap = h("div", {
+      class: "memoarea memowrap context-memo",
+      hidden: !ta.value,
+    }, ta);
+    const btn = h("button", {
+      class: "memobtn",
+      onclick: function (ev) {
+        ev.preventDefault();
+        wrap.hidden = !wrap.hidden;
+        if (!wrap.hidden) ta.focus();
+      },
+    }, "質問/指摘を書く");
+    return { btn: btn, wrap: wrap };
+  }
+
+  // 00 / 背景とコンテキスト（レビュー対象・生成情報と annotations.json の context を描画）
+  function contextSection() {
+    const c = anno.context || {};
+    const mp = contextMemoParts();
+    const kids = [
+      h("div", {},
+        h("div", { class: "ctx-h" }, "レビュー対象"),
+        h("p", { class: "ctx-bg" }, "対象: " + diff.rangeLabel),
+        h("p", { class: "ctx-bg source" },
+          diff.prRef ? "PR: " + diff.prRef : "ローカルPath: " + diff.repoRoot),
+        h("p", { class: "ctx-bg" }, "生成: " + generatedAtLabel(data.generatedAt))),
+    ];
+    if (anno.summary || c.background) {
+      kids.push(h("div", {},
+        h("div", { class: "ctx-h" }, "概要 / 背景"),
+        anno.summary ? h("p", { class: "ctx-bg" }, anno.summary) : null,
+        c.background ? h("p", { class: "ctx-bg" }, c.background) : null));
+    }
+    if (c.requestedBy) {
+      kids.push(h("div", {},
+        h("div", { class: "ctx-h" }, "要望元"),
+        h("p", { class: "ctx-bg" }, c.requestedBy)));
+    }
+    if (Array.isArray(c.terms) && c.terms.length) {
+      kids.push(h("div", {},
+        h("div", { class: "ctx-h" }, "初見の人向け用語メモ"),
+        c.terms.map(function (t) {
+          return h("div", { class: "term" }, h("span", { class: "chip kind" }, t.term), h("span", {}, t.desc));
+        })));
+    }
+    if (Array.isArray(c.links) && c.links.length) {
+      kids.push(h("div", {},
+        h("div", { class: "ctx-h" }, "関連リンク"),
+        c.links.map(function (l) {
+          // render側で検証済みだが、画面側でも http(s) 以外は絶対にhrefへ入れない
+          if (typeof l.url !== "string" || !/^https?:\/\//i.test(l.url)) {
+            return h("div", { class: "term" }, (l.label || "") + "（無効なURL）");
+          }
+          return h("a", { class: "ctx-link", href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url);
+        })));
+    }
+    return h("section", { class: "sec" },
+      h("h2", {}, "00 / 背景とコンテキスト"),
+      h("article", { class: "gcard ctxcard" }, kids,
+        h("div", { class: "context-actions" }, mp.btn),
+        mp.wrap));
+  }
+
+  async function copyInboxPath() {
+    if (!data.commentsPath) return;
+    // ユーザー方針: コピーするのはパスのみ（依頼文は付けない）
+    try {
+      await navigator.clipboard.writeText(data.commentsPath);
+    } catch (e) {
+      const ta = h("textarea", {});
+      ta.value = data.commentsPath;
+      document.body.append(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    const pb = document.getElementById("pathbtn");
+    pb.textContent = "コピーしました";
+    setTimeout(function () { pb.textContent = "受信箱パスをコピー"; }, 1200);
+  }
+
+  // ---------- 承認・進捗 ----------
+  function updateProgress() {
+    const n = groups.filter(function (gv) { return !!state.approved[gv.i]; }).length;
+    document.getElementById("plabel").textContent = "承認 " + n + "/" + groups.length;
+    document.getElementById("pfill").style.width = (groups.length ? (100 * n / groups.length) : 0) + "%";
+    document.querySelectorAll("[data-gi]").forEach(function (el) {
+      el.classList.toggle("approved", !!state.approved[el.dataset.gi]);
+    });
+  }
+
+  // ---------- 行コメント（クリック=1行 / 行番号を縦ドラッグ=範囲） ----------
+  function hunkRows(hk) {
+    let o = hk.oldStart, n = hk.newStart;
+    return hk.lines.map(function (l) {
+      const t = l[0];
+      const r = { t: t, s: l[1], no: "", nn: "", cls: "ctx" };
+      if (t === "+") { r.nn = String(n++); r.cls = "add"; }
+      else if (t === "-") { r.no = String(o++); r.cls = "del"; }
+      else if (t === " ") { r.no = String(o++); r.nn = String(n++); }
+      else { r.cls = "meta"; r.s = "No newline at end of file"; }
+      return r;
+    });
+  }
+  function lineLabel(hk, from, to) {
+    const rows = hunkRows(hk).slice(from, to + 1);
+    const nn = rows.map(function (r) { return r.nn; }).filter(Boolean);
+    const no = rows.map(function (r) { return r.no; }).filter(Boolean);
+    const hasDel = rows.some(function (r) { return r.t === "-"; });
+    const parts = [];
+    if (nn.length) parts.push(nn.length > 1 ? "L" + nn[0] + "-L" + nn[nn.length - 1] : "L" + nn[0]);
+    // 削除行を含む選択では旧行番号も併記する（新番号だけでは削除位置を表現できないため）
+    if (no.length && (hasDel || !nn.length)) {
+      parts.push(no.length > 1 ? "旧L" + no[0] + "-L" + no[no.length - 1] : "旧L" + no[0]);
+    }
+    return parts.length ? parts.join(" / ") : "(位置不明)";
+  }
+  function markRange(trs, c, on) {
+    for (let i = c.from; i <= c.to && i < trs.length; i++) trs[i].classList.toggle("lcmark", on);
+  }
+  function commentRow(hk, trs, c) {
+    const ta = h("textarea", { placeholder: "この行（範囲）への質問・指摘。入力は自動保存されます" });
+    ta.value = c.text || "";
+    ta.addEventListener("input", function () {
+      c.text = ta.value;
+      saveState();
+      updateCopyBtn();
+    });
+    const del = h("button", { class: "memobtn" }, "削除");
+    const tr = h("tr", { class: "crow" },
+      h("td", { colspan: "4" },
+        h("div", { class: "linecomment" },
+          h("div", { class: "lc-head" },
+            h("span", { class: "chip line" }, "行コメント"),
+            h("span", {}, hk.id + " " + lineLabel(hk, c.from, c.to)),
+            del),
+          ta)));
+    del.addEventListener("click", function () {
+      const arr = state.lines[hk.id] || [];
+      const i = arr.indexOf(c);
+      if (i >= 0) arr.splice(i, 1);
+      saveState();
+      updateCopyBtn();
+      markRange(trs, c, false);
+      tr.remove();
+    });
+    return tr;
+  }
+  function wireSelection(hk, tbody, trs) {
+    let anchor = -1, current = -1, dragging = false;
+    function paint() {
+      const lo = Math.min(anchor, current), hi = Math.max(anchor, current);
+      trs.forEach(function (tr, i) {
+        tr.classList.toggle("selecting", dragging && i >= lo && i <= hi);
+      });
+    }
+    tbody.addEventListener("mousedown", function (ev) {
+      if (!ev.target.closest("td.sel")) return;
+      const tr = ev.target.closest("tr");
+      if (!tr || tr.dataset.idx === undefined) return;
+      dragging = true;
+      anchor = current = Number(tr.dataset.idx);
+      paint();
+      ev.preventDefault();
+    });
+    tbody.addEventListener("mouseover", function (ev) {
+      if (!dragging) return;
+      const tr = ev.target.closest("tr");
+      if (!tr || tr.dataset.idx === undefined) return;
+      current = Number(tr.dataset.idx);
+      paint();
+    });
+    window.addEventListener("mouseup", function () {
+      if (!dragging) return;
+      dragging = false;
+      paint();
+      const c = { from: Math.min(anchor, current), to: Math.max(anchor, current), text: "" };
+      if (!state.lines[hk.id]) state.lines[hk.id] = [];
+      state.lines[hk.id].push(c);
+      saveState();
+      const tr = commentRow(hk, trs, c);
+      trs[Math.min(c.to, trs.length - 1)].after(tr);
+      markRange(trs, c, true);
+      updateCopyBtn();
+      tr.querySelector("textarea").focus();
+    });
+  }
+
+  // ---------- 描画 ----------
+  function diffTable(hk) {
+    if (!hk.lines.length) return h("div", { class: "hempty" }, hk.header);
+    const tbody = h("tbody", {});
+    const trs = hunkRows(hk).map(function (r, idx) {
+      const tr = h("tr", { class: r.cls, dataset: { idx: String(idx) } },
+        h("td", { class: "n sel", title: "クリック=行コメント / 行番号を縦にドラッグ=範囲コメント" }, r.no),
+        h("td", { class: "n sel", title: "クリック=行コメント / 行番号を縦にドラッグ=範囲コメント" }, r.nn),
+        h("td", { class: "m" }, r.t === "\\" ? "" : r.t),
+        h("td", { class: "c" }, r.s));
+      tbody.append(tr);
+      return tr;
+    });
+    (state.lines[hk.id] || []).forEach(function (c) {
+      if (c.to >= trs.length) return; // hunkと合わない古い状態は表示しない
+      trs[c.to].after(commentRow(hk, trs, c));
+      markRange(trs, c, true);
+    });
+    wireSelection(hk, tbody, trs);
+    return h("table", { class: "diff" }, tbody);
+  }
+
+  function memoParts(hk) {
+    const ta = h("textarea", {
+      placeholder: "このhunk全体への質問・指摘（「質問/指摘をコピー/送信」でまとめられます）",
+      oninput: function (ev) {
+        state.memos[hk.id] = ev.target.value;
+        saveState();
+        updateCopyBtn();
+      },
+    });
+    ta.value = state.memos[hk.id] || "";
+    const wrap = h("div", { class: "memoarea memowrap", hidden: !ta.value }, ta);
+    const btn = h("button", {
+      class: "memobtn",
+      onclick: function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        wrap.hidden = !wrap.hidden;
+        if (!wrap.hidden) ta.focus();
+      },
+    }, "質問/指摘を書く");
+    return { btn: btn, wrap: wrap };
+  }
+
+  function hunkBlock(gv, file, hk) {
+    const mp = memoParts(hk);
+    const barKids = [
+      h("span", { class: "hid" }, hk.id),
+      h("span", {}, file.path),
+      h("span", { class: "hhdr" }, hk.header.startsWith("@@") ? hk.header : ""),
+    ];
+    const findings = gv.findings
+      .filter(function (fd) { return fd.hunk === hk.id; })
+      .map(function (fd) {
+        return h("div", { class: "finding" }, h("span", { class: "chip find" }, "指摘"), h("span", {}, fd.note));
+      });
+    const body = [diffTable(hk), findings];
+    const collapsed = hk.collapsed || file.collapsed;
+    if (collapsed) {
+      return h("div", {},
+        h("details", { class: "hunk" },
+          h("summary", {}, h("div", { class: "hbar" }, barKids,
+            h("span", { class: "chip" }, "折りたたみ（" + hk.lines.length + "行）クリックで展開"),
+            h("span", { class: "spacer" }), mp.btn)),
+          body),
+        mp.wrap);
+    }
+    return h("div", { class: "hunk" },
+      h("div", { class: "hbar" }, barKids, h("span", { class: "spacer" }), mp.btn),
+      mp.wrap, body);
+  }
+
+  function fileBlock(gv, fb) {
+    const st = STATUS[fb.file.status] || "";
+    return h("div", { class: "fblock" },
+      h("div", { class: "fbar" },
+        st ? h("span", { class: "chip" }, st) : null,
+        h("span", {}, fb.file.path),
+        fb.file.oldPath ? h("span", { class: "fold" }, "← " + fb.file.oldPath) : null),
+      fb.hunks.map(function (hk) { return hunkBlock(gv, fb.file, hk); }));
+  }
+
+  function groupCard(gv) {
+    const findCount = gv.findings.length;
+    return h("article", { class: "gcard risk-" + gv.g.risk, id: "g" + gv.i, dataset: { gi: String(gv.i) } },
+      h("div", { class: "ghead" },
+        h("div", { class: "ghead-l" },
+          h("span", { class: "chip risk " + gv.g.risk }, RISK[gv.g.risk].label),
+          h("h3", {}, gv.g.title)),
+        h("label", { class: "approve" },
+          h("input", {
+            type: "checkbox",
+            checked: !!state.approved[gv.i],
+            onchange: function (ev) {
+              state.approved[gv.i] = ev.target.checked;
+              saveState();
+              updateProgress();
+            },
+          }),
+          h("span", {}, "確認して承認"))),
+      h("div", { class: "gmeta" },
+        h("span", { class: "chip kind" }, KIND[gv.g.kind] || KIND.other),
+        h("span", { class: "chip" }, gv.ids.length + " hunks"),
+        h("span", { class: "chip stats" }, h("span", { class: "add" }, "+" + gv.add), " ", h("span", { class: "del" }, "−" + gv.del)),
+        findCount ? h("span", { class: "chip find" }, "指摘 " + findCount) : null),
+      h("p", { class: "intent" }, h("b", {}, "意図: "), gv.g.intent),
+      gv.notes.length ? h("ul", { class: "notes" }, gv.notes.map(function (n) { return h("li", {}, n); })) : null,
+      Array.from(gv.byFile.values()).map(function (fb) { return fileBlock(gv, fb); }));
+  }
+
+  function groupRow(gv) {
+    return h("a", { class: "grow risk-" + gv.g.risk, href: "#g" + gv.i, dataset: { gi: String(gv.i) } },
+      h("div", { class: "grow-main" },
+        h("div", { class: "grow-title" }, h("span", { class: "okmark" }, "✓"), gv.g.title),
+        h("div", { class: "grow-sum" }, gv.g.summary || gv.g.intent)),
+      h("div", { class: "grow-side" },
+        gv.findings.length ? h("span", { class: "chip find" }, "指摘 " + gv.findings.length) : null,
+        h("span", { class: "chip kind" }, KIND[gv.g.kind] || KIND.other),
+        h("span", { class: "chip" }, gv.ids.length + " hunks"),
+        h("span", { class: "chip risk " + gv.g.risk }, RISK[gv.g.risk].label)));
+  }
+
+  document.title = anno.title + " — DIFF REVIEW";
+  const app = document.getElementById("app");
+  app.append(
+    h("header", { class: "topbar" },
+      h("div", { class: "brand" }, "DIFF REVIEW"),
+      h("div", { class: "title" }, anno.title),
+      h("span", { class: "chip stats" },
+        diff.stats.files + " files / " + diff.stats.hunks + " hunks ",
+        h("span", { class: "add" }, "+" + diff.stats.additions), " ",
+        h("span", { class: "del" }, "−" + diff.stats.deletions)),
+      h("div", { class: "progress" },
+        h("div", { class: "bar" }, h("div", { class: "fill", id: "pfill" })),
+        h("span", { id: "plabel" })),
+      h("button", {
+        class: "copybtn", id: "copybtn", onclick: copyMemos,
+        title: "全ての質問・指摘をプロンプトとしてクリップボードにコピーします（AIへは手動で貼り付け）",
+      }),
+      SERVED ? h("button", {
+        class: "copybtn", id: "sendbtn", onclick: sendMemos,
+        title: "serveが $XDG_DATA_HOME/review-helper/<review-id>/comments.json（受信箱）に保存します。serve --once で待機中のエージェントにはその場で渡ります。",
+      }) : null,
+      SERVED ? h("button", {
+        class: "copybtn", id: "pathbtn", hidden: true, onclick: copyInboxPath,
+        title: "受信箱（comments.json）のパスのみをコピーします。Codex / Claude Code に貼り付けて対応を依頼できます。",
+      }, "受信箱パスをコピー") : null),
+    contextSection(),
+    h("section", { class: "sec" },
+      h("h2", {}, "01 / 変更グループ一覧"),
+      h("div", { class: "glist" }, groups.map(groupRow))),
+    h("section", { class: "sec" },
+      h("h2", {}, "02 / 変更グループ詳細"),
+      groups.map(groupCard)),
+    h("footer", {}, "review-helper / 状態キー: " + data.stateKey +
+      "（承認・メモはこのブラウザ内にのみ保存。diffが変わると自動リセット）"));
+
+  updateProgress();
+  updateCopyBtn();
+})();
+</script>
+</body>
+</html>
