@@ -539,3 +539,24 @@ test("PR URLの直渡しは自動判別され、gh pr diff に同じURLが渡り
     rmSync(bin, { recursive: true, force: true });
   }
 });
+
+test("renderはreview.htmlのPathを画面データに埋め込み、画面に表示・コピーできる", () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-htmlpath-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+    expect(run(["extract"], repo).code).toBe(0);
+    writeAnnotations(repo);
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+
+    const htmlPath = join(reviewDir(repo), "review.html");
+    const html = readFileSync(htmlPath, "utf-8");
+    // 「質問/指摘を送信」後（serve終了後）の再閲覧用に、画面データへ自身のPathを埋め込む
+    expect(html).toContain(`"htmlPath":${JSON.stringify(htmlPath)}`);
+    // 画面側: 背景セクションでの常時表示と、送信後に出すコピー用ボタン
+    expect(html).toContain('"HTML: " + data.htmlPath');
+    expect(html).toContain("HTMLパスをコピー");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

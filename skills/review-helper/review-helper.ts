@@ -753,19 +753,20 @@ function render(args: string[]) {
   if (!existsSync(templatePath)) die(`テンプレートがありません: ${templatePath}`);
   const template = readFileSync(templatePath, "utf-8");
 
+  const htmlPath = join(outDir, "review.html");
   const combined = {
     generatedAt: new Date().toISOString(),
     stateKey: fnv1a(stableDiffJson(diff)), // 同じdiffなら承認状態を維持、diffが変われば自動リセット（createdAt等は含めない）
     diff,
     annotations: anno,
     commentsPath: join(outDir, "comments.json"), // 画面の「受信箱パスをコピー」用
+    htmlPath, // 「質問/指摘を送信」後（serve終了後）もファイルを直接開けるよう、画面にパスを表示する
   };
   // 安全要件: `<` をすべて \u003c にエスケープし、</script> によるタグ脱出を防ぐ
   const payload = JSON.stringify(combined).replace(/</g, "\\u003c");
   if (!template.includes("__REVIEW_DATA__")) die("template.html に __REVIEW_DATA__ プレースホルダがありません");
   const html = template.replace("__REVIEW_DATA__", () => payload);
 
-  const htmlPath = join(outDir, "review.html");
   writeFileSync(htmlPath, html);
   console.log(`[review-helper] 生成完了: ${htmlPath}`);
   console.log(`  グループ: ${anno.groups.length} / hunk: ${diff.stats.hunks}（全hunk割り当て済みを検証OK）`);

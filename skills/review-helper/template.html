@@ -287,11 +287,8 @@
       sb.disabled = n === 0;
     }
   }
-  async function copyMemos() {
-    const items = collectMemos();
-    if (!items.length) return;
-    const text = buildPrompt(items);
-    window.__lastReviewPrompt = text; // 動作確認用フック
+  /** クリップボードへコピーする（clipboard APIが使えない環境ではtextareaフォールバック） */
+  async function copyText(text) {
     try {
       await navigator.clipboard.writeText(text);
     } catch (e) {
@@ -302,6 +299,13 @@
       document.execCommand("copy");
       ta.remove();
     }
+  }
+  async function copyMemos() {
+    const items = collectMemos();
+    if (!items.length) return;
+    const text = buildPrompt(items);
+    window.__lastReviewPrompt = text; // 動作確認用フック
+    await copyText(text);
     const btn = document.getElementById("copybtn");
     btn.textContent = "コピーしました";
     setTimeout(updateCopyBtn, 1200);
@@ -354,6 +358,9 @@
       } else {
         sb.textContent = "送信しました（受信箱に保存）";
         document.getElementById("pathbtn").hidden = false;
+        // serve --once はこの送信で終了するため、以後の再閲覧用にHTMLパスのコピー導線も出す
+        const hb = document.getElementById("htmlbtn");
+        if (hb) hb.hidden = false;
       }
     } catch (e) {
       sb.textContent = "送信失敗（serve実行中か確認）";
@@ -405,6 +412,10 @@
         h("p", { class: "ctx-bg" }, "対象: " + diff.rangeLabel),
         h("p", { class: "ctx-bg source" },
           diff.prRef ? "PR: " + diff.prRef : "ローカルPath: " + diff.repoRoot),
+        data.htmlPath ? h("p", {
+          class: "ctx-bg source",
+          title: "「質問/指摘を送信」後（serve終了後）も、このファイルをブラウザで開けばレビュー画面を再閲覧できます",
+        }, "HTML: " + data.htmlPath) : null,
         h("p", { class: "ctx-bg" }, "生成: " + generatedAtLabel(data.generatedAt))),
     ];
     if (anno.summary || c.background) {
@@ -446,19 +457,18 @@
   async function copyInboxPath() {
     if (!data.commentsPath) return;
     // ユーザー方針: コピーするのはパスのみ（依頼文は付けない）
-    try {
-      await navigator.clipboard.writeText(data.commentsPath);
-    } catch (e) {
-      const ta = h("textarea", {});
-      ta.value = data.commentsPath;
-      document.body.append(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
-    }
+    await copyText(data.commentsPath);
     const pb = document.getElementById("pathbtn");
     pb.textContent = "コピーしました";
     setTimeout(function () { pb.textContent = "受信箱パスをコピー"; }, 1200);
+  }
+  async function copyHtmlPath() {
+    if (!data.htmlPath) return;
+    // ユーザー方針: コピーするのはパスのみ（依頼文は付けない）
+    await copyText(data.htmlPath);
+    const hb = document.getElementById("htmlbtn");
+    hb.textContent = "コピーしました";
+    setTimeout(function () { hb.textContent = "HTMLパスをコピー"; }, 1200);
   }
 
   // ---------- 承認・進捗 ----------
@@ -715,7 +725,11 @@
       SERVED ? h("button", {
         class: "copybtn", id: "pathbtn", hidden: true, onclick: copyInboxPath,
         title: "受信箱（comments.json）のパスのみをコピーします。Codex / Claude Code に貼り付けて対応を依頼できます。",
-      }, "受信箱パスをコピー") : null),
+      }, "受信箱パスをコピー") : null,
+      SERVED && data.htmlPath ? h("button", {
+        class: "copybtn", id: "htmlbtn", hidden: true, onclick: copyHtmlPath,
+        title: "レビュー画面（review.html）のパスをコピーします。serve終了後もこのファイルをブラウザで開けば再閲覧できます。",
+      }, "HTMLパスをコピー") : null),
     contextSection(),
     h("section", { class: "sec" },
       h("h2", {}, "01 / 変更グループ一覧"),
