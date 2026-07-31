@@ -71,6 +71,12 @@ interface Finding {
   note: string;
 }
 
+/** グループの比較表（変更前/変更後など、対応関係を構造化して見せる任意項目） */
+interface GroupTable {
+  headers: string[];
+  rows: string[][];
+}
+
 interface Group {
   title: string;
   summary?: string;
@@ -80,6 +86,7 @@ interface Group {
   notes?: string[];
   hunks: string[];
   findings?: Finding[];
+  table?: GroupTable;
 }
 
 interface Annotations {
@@ -673,6 +680,30 @@ function validateAnnotations(anno: Annotations, diff: DiffDoc): { errors: string
       if (!fd || typeof fd.note !== "string" || !fd.note.trim()) errors.push(`${name}: findings の note は必須です`);
       else if (!allIds.has(fd.hunk)) errors.push(`${name}: findings が存在しないhunk ID「${fd.hunk}」を参照しています`);
       else if (!g.hunks.includes(fd.hunk)) warnings.push(`${name}: 指摘「${fd.note.slice(0, 30)}…」の対象 ${fd.hunk} はこのグループのhunksに含まれていません`);
+    }
+    // LLM出力は型が崩れがちなので、例外死させず検証エラーとして報告する
+    const table: unknown = g.table;
+    if (table !== undefined) {
+      if (typeof table !== "object" || table === null || Array.isArray(table)) {
+        errors.push(`${name}: table は {headers, rows} のオブジェクトにしてください`);
+      } else {
+        const t = table as { headers?: unknown; rows?: unknown };
+        const headers = Array.isArray(t.headers) ? t.headers : undefined;
+        const headersOk =
+          !!headers && headers.length > 0 && headers.every((x) => typeof x === "string" && x.trim());
+        if (!headersOk) errors.push(`${name}: table.headers は1件以上の空でない文字列の配列にしてください`);
+        if (!Array.isArray(t.rows) || t.rows.length === 0) {
+          errors.push(`${name}: table.rows は1行以上の配列にしてください`);
+        } else {
+          t.rows.forEach((row, ri) => {
+            if (!Array.isArray(row) || !row.every((cell) => typeof cell === "string")) {
+              errors.push(`${name}: table.rows[${ri}] は文字列の配列にしてください`);
+            } else if (headersOk && row.length !== headers!.length) {
+              warnings.push(`${name}: table.rows[${ri}] の列数（${row.length}）が headers の列数（${headers!.length}）と一致していません`);
+            }
+          });
+        }
+      }
     }
   });
 
