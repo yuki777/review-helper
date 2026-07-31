@@ -470,6 +470,83 @@ test("contextの型崩れは例外ではなく検証エラーになり、正し�
   }
 });
 
+test("groupのtableは検証され、正しいtableは画面データに埋め込まれる", () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-table-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+    expect(run(["extract"], repo).code).toBe(0);
+
+    const writeWithTable = (table: unknown) => {
+      const diff = JSON.parse(readFileSync(join(reviewDir(repo), "diff.json"), "utf-8"));
+      const ids = diff.files.flatMap((f: { hunks: { id: string }[] }) => f.hunks.map((h) => h.id));
+      writeFileSync(
+        join(reviewDir(repo), "annotations.json"),
+        JSON.stringify({
+          title: "テストレビュー",
+          groups: [{ title: "全変更", risk: "low", intent: "テスト用の注釈", hunks: ids, table }],
+        }),
+      );
+    };
+
+    // 型崩れは例外ではなく検証エラーとして報告される
+    writeWithTable("これはオブジェクトではない");
+    const bad = run(["render", "--no-open"], repo);
+    expect(bad.code).toBe(1);
+    expect(bad.out).toContain("table は {headers, rows} のオブジェクトにしてください");
+    expect(bad.out).not.toContain("TypeError");
+
+    writeWithTable({ headers: [], rows: "x" });
+    const empty = run(["render", "--no-open"], repo);
+    expect(empty.code).toBe(1);
+    expect(empty.out).toContain("table.headers は1件以上");
+    expect(empty.out).toContain("table.rows は1行以上");
+
+    // 列数不一致は警告のみ（renderは成功する）
+    writeWithTable({ headers: ["観点", "変更前"], rows: [["タイムアウトのみ"]] });
+    const warn = run(["render", "--no-open"], repo);
+    expect(warn.code).toBe(0);
+    expect(warn.out).toContain("列数");
+
+    // 正しいtableは画面データに埋め込まれる
+    writeWithTable({
+      headers: ["観点", "変更前", "変更後"],
+      rows: [["タイムアウト", "30秒固定", "設定値（既定30秒）"]],
+    });
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+    const html = readFileSync(join(reviewDir(repo), "review.html"), "utf-8");
+    expect(html).toContain('"table":{"headers":["観点","変更前","変更後"]');
+    expect(html).toContain("タイムアウト");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("レビュー画面は自前シンタックスハイライトを含み、外部リソースを参照しない", () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-highlight-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "sample.ts"), 'const answer = 42; // 答え\nexport function hi() { return "hello"; }\n');
+    expect(run(["extract"], repo).code).toBe(0);
+    writeAnnotations(repo);
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+
+    const html = readFileSync(join(reviewDir(repo), "review.html"), "utf-8");
+    // 自前トークナイザとトークン用CSSが含まれる
+    expect(html).toContain("tokenizeLine");
+    expect(html).toContain(".hl-kw");
+    expect(html).toContain("langOf");
+    // 折りたたみhunk（ロックファイル・巨大hunk）は展開時の遅延着色（初期表示のspan量産防止）
+    expect(html).toContain("wireLazyHighlight");
+    expect(html).toContain("diffTable(file, hk, collapsed)");
+    // セキュリティ要件の回帰ガード: 外部CDN・外部リソースを参照しない単一HTMLのまま
+    expect(html).not.toMatch(/<(script|link|img)[^>]+(src|href)\s*=\s*["']?https?:/i);
+    expect(html).not.toMatch(/\.\s*innerHTML\s*=/); // コメント中の単語ではなく、実際の代入だけを禁止する
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("PR URLの直渡しは自動判別され、gh pr diff に同じURLが渡りprRefが保存される", () => {
   const repo = mkdtempSync(join(tmpdir(), "review-helper-pr-test-"));
   const bin = mkdtempSync(join(tmpdir(), "review-helper-fakegh-"));

@@ -69,6 +69,11 @@
   .intent { padding: 0 16px; margin: 10px 0 8px; }
   .intent b { color: var(--green); }
   .notes { margin: 0 0 12px; padding: 0 16px 0 36px; color: var(--muted); font-size: 13px; }
+  .gtable-wrap { padding: 0 16px 12px; overflow-x: auto; }
+  table.gtable { border-collapse: collapse; font-size: 13px; }
+  table.gtable th, table.gtable td { border: 1px solid var(--border); padding: 4px 10px;
+                                     text-align: left; vertical-align: top; }
+  table.gtable th { background: #f6f8fa; font-weight: 600; }
 
   .fblock { border-top: 1px solid var(--border); }
   .fbar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; background: #fafbfc;
@@ -91,6 +96,10 @@
   tr.add { background: var(--add-bg); } tr.add td.n { background: #d7f5df; }
   tr.del { background: var(--del-bg); } tr.del td.n { background: #ffd7d5; }
   tr.meta td { color: #8b949e; font-style: italic; }
+  .hl-kw { color: #cf222e; }
+  .hl-st { color: #0a3069; }
+  .hl-nu { color: #0550ae; }
+  .hl-cm { color: #59636e; font-style: italic; }
   .hempty { padding: 8px 16px; color: var(--muted); font-size: 12px; font-style: italic; }
 
   .finding { display: flex; gap: 8px; align-items: flex-start; margin: 8px 16px; padding: 8px 12px;
@@ -568,16 +577,220 @@
     });
   }
 
+  // ---------- 軽量シンタックスハイライト ----------
+  // 設計方針: 外部ライブラリ・外部リソースは使わず（オフライン単一HTMLの要件維持）、
+  // 行単位の簡易トークナイザでコメント・文字列・数値・キーワードだけを着色する。
+  // 描画は h() によるspan生成のみで、innerHTMLに文字列を渡さない（セキュリティ要件の維持）。
+  // 行をまたぐ構文（ブロックコメント・複数行文字列）は開始行だけ着色される既知の割り切り。
+  const KW = {
+    js: "abstract as async await break case catch class const continue debugger default delete do else enum export extends false finally for from function get if implements import in infer instanceof interface is keyof let namespace new null of override private protected public readonly return satisfies set static super switch this throw true try type typeof undefined var void while yield",
+    py: "and as assert async await break case class continue def del elif else except finally for from global if import in is lambda match nonlocal not or pass raise return self try while with yield False None True",
+    rb: "alias and begin break case class def do else elsif end ensure false for if in module next nil not or redo require require_relative rescue retry return self super then true undef unless until when while yield",
+    go: "append break cap case chan const continue copy default defer delete else fallthrough false for func go goto if import interface iota len make map new nil package panic range recover return select struct switch true type var",
+    rs: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while Some None Ok Err",
+    java: "abstract assert boolean break byte case catch char class companion const continue data default do double else enum extends final finally float for fun goto if implements import instanceof int interface long native new null object package private protected public record return sealed short static super switch synchronized this throw throws transient true try val var void volatile when while false",
+    c: "auto bool break case catch char class const constexpr continue default delete do double else enum explicit extern false float for friend func goto guard if inline inout int let long mutable namespace new nullptr operator override private protected public register return short signed sizeof static struct switch template this throw true try typedef typename union unsigned using var virtual void volatile while NULL",
+    php: "abstract and array as break callable case catch class clone const continue declare default do echo else elseif empty enum extends final finally fn for foreach function global if implements include include_once instanceof insteadof interface isset list match namespace new null or print private protected public readonly require require_once return static switch throw trait true try unset use var while xor yield false",
+    sh: "alias break case cd continue declare do done echo elif else esac eval exec exit export fi for function if in local printf read readonly return select set shift source then time trap unset until while",
+    sql: "add all alter and any as asc begin between by case cast check column commit constraint create cross database declare default delete desc distinct drop else end exists foreign from full group having if in index inner insert into is join key left like limit not null offset on or order outer primary references replace right rollback select set table then to transaction union unique update using values view when where with",
+    json: "true false null",
+    yaml: "true false null yes no on off",
+    ini: "true false",
+  };
+  const EXT_LANG = {
+    js: "js", jsx: "js", ts: "js", tsx: "js", mjs: "js", cjs: "js", mts: "js", cts: "js",
+    py: "py", pyi: "py",
+    rb: "rb", rake: "rb", gemspec: "rb",
+    go: "go",
+    rs: "rs",
+    java: "java", kt: "java", kts: "java", scala: "java", groovy: "java", gradle: "java",
+    c: "c", h: "c", cc: "c", cpp: "c", cxx: "c", hh: "c", hpp: "c", m: "c", mm: "c", cs: "c", swift: "c",
+    php: "php",
+    sh: "sh", bash: "sh", zsh: "sh",
+    sql: "sql",
+    json: "json", jsonc: "json",
+    yml: "yaml", yaml: "yaml",
+    toml: "ini", ini: "ini", conf: "ini", properties: "ini", env: "ini",
+    css: "css", scss: "css", less: "css",
+    html: "html", htm: "html", xml: "html", svg: "html", vue: "html",
+  };
+  const LANG_DEF = {
+    js: { lc: ["//"], bc: true, q: "\"'`" },
+    py: { lc: ["#"], q: "\"'" },
+    rb: { lc: ["#"], q: "\"'" },
+    go: { lc: ["//"], bc: true, q: "\"'`" },
+    rs: { lc: ["//"], bc: true, q: "\"" },
+    java: { lc: ["//"], bc: true, q: "\"'" },
+    c: { lc: ["//"], bc: true, q: "\"'" },
+    php: { lc: ["//", "#"], bc: true, q: "\"'" },
+    sh: { lc: ["#"], q: "\"'" },
+    sql: { lc: ["--"], bc: true, q: "'\"", ci: true },
+    json: { lc: [], q: "\"" },
+    yaml: { lc: ["#"], q: "\"'" },
+    ini: { lc: ["#", ";"], q: "\"'" },
+    css: { lc: [], bc: true, q: "\"'" },
+    html: { lc: [], q: "\"'", tag: true },
+  };
+  const LANGS = {};
+  for (const key of Object.keys(LANG_DEF)) {
+    const def = LANG_DEF[key];
+    LANGS[key] = {
+      lc: def.lc, bc: !!def.bc, q: def.q, ci: !!def.ci, tag: !!def.tag,
+      kw: new Set((KW[key] || "").split(" ").filter(Boolean)),
+    };
+  }
+  const SPECIAL_FILE = { dockerfile: "sh", makefile: "sh", gemfile: "rb", rakefile: "rb" };
+
+  function langOf(path) {
+    const base = path.split("/").pop().toLowerCase();
+    if (SPECIAL_FILE[base]) return LANGS[SPECIAL_FILE[base]];
+    const dot = base.lastIndexOf(".");
+    const key = dot >= 0 ? EXT_LANG[base.slice(dot + 1)] : undefined;
+    return key ? LANGS[key] : null;
+  }
+
+  const NUM_RE = /(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)/y;
+  const WORD_RE = /[A-Za-z_$][A-Za-z0-9_$]*/y;
+  const TAG_RE = /<\/?[A-Za-z][A-Za-z0-9-]*/y;
+
+  function stickyMatch(re, text, i) {
+    re.lastIndex = i;
+    const m = re.exec(text);
+    return m ? m[0] : null;
+  }
+
+  /** 1行を [CSSクラス|null, テキスト] のトークン列に分解する */
+  function tokenizeLine(text, lang) {
+    const tokens = [];
+    let plain = "";
+    function flush() { if (plain) { tokens.push([null, plain]); plain = ""; } }
+    function push(cls, s) { flush(); tokens.push([cls, s]); }
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      const prev = i > 0 ? text[i - 1] : "";
+
+      // 行コメント。"https://" の // や "i--" の -- を誤検出しないよう直前の文字を見る
+      let comment = false;
+      for (const mark of lang.lc) {
+        if (!text.startsWith(mark, i)) continue;
+        if (mark === "//" ? prev === ":" : i > 0 && !/\s/.test(prev)) continue;
+        push("hl-cm", text.slice(i));
+        i = text.length;
+        comment = true;
+        break;
+      }
+      if (comment) break;
+
+      // ブロックコメント（行内で閉じなければ行末まで）
+      if (lang.bc && text.startsWith("/*", i)) {
+        const end = text.indexOf("*/", i + 2);
+        const stop = end < 0 ? text.length : end + 2;
+        push("hl-cm", text.slice(i, stop));
+        i = stop;
+        continue;
+      }
+      if (lang.tag && text.startsWith("<!--", i)) {
+        const end = text.indexOf("-->", i + 4);
+        const stop = end < 0 ? text.length : end + 3;
+        push("hl-cm", text.slice(i, stop));
+        i = stop;
+        continue;
+      }
+
+      // 文字列（バックスラッシュのエスケープを考慮して同じ引用符まで進む）
+      if (lang.q.indexOf(ch) >= 0) {
+        let j = i + 1;
+        while (j < text.length && text[j] !== ch) j += text[j] === "\\" ? 2 : 1;
+        if (j < text.length) {
+          push("hl-st", text.slice(i, j + 1));
+          i = j + 1;
+          continue;
+        }
+        // 行内で閉じない引用符: ' は誤検出が多い（Rustのライフタイム・英文の所有格等）ため
+        // 素通しし、" と ` は複数行文字列の開始行とみなして行末まで着色する
+        if (ch !== "'") {
+          push("hl-st", text.slice(i));
+          break;
+        }
+        plain += ch;
+        i++;
+        continue;
+      }
+
+      // HTML/XMLのタグ名
+      if (lang.tag && ch === "<") {
+        const m = stickyMatch(TAG_RE, text, i);
+        if (m) { push("hl-kw", m); i += m.length; continue; }
+      }
+
+      // 数値（識別子の一部 foo123 は除外）
+      if (ch >= "0" && ch <= "9" && !/[A-Za-z0-9_$]/.test(prev)) {
+        const m = stickyMatch(NUM_RE, text, i);
+        if (m) { push("hl-nu", m); i += m.length; continue; }
+      }
+
+      // 識別子 / キーワード
+      if (/[A-Za-z_$]/.test(ch)) {
+        const w = stickyMatch(WORD_RE, text, i);
+        if (lang.kw.has(lang.ci ? w.toLowerCase() : w)) push("hl-kw", w);
+        else plain += w;
+        i += w.length;
+        continue;
+      }
+
+      plain += ch;
+      i++;
+    }
+    flush();
+    return tokens;
+  }
+
+  /** トークン列をテキストノードとspanとして追加する（innerHTML不使用） */
+  function appendTokens(td, text, lang) {
+    for (const t of tokenizeLine(text, lang)) {
+      td.append(t[0] ? h("span", { class: t[0] }, t[1]) : t[1]);
+    }
+  }
+
+  /** diff本文セル */
+  function codeCell(text, lang) {
+    const td = h("td", { class: "c" });
+    if (!lang || !text) td.append(text);
+    else appendTokens(td, text, lang);
+    return td;
+  }
+
+  /**
+   * 折りたたみhunk（ロックファイル・400行超）は開かれるまで着色を遅延する。
+   * 巨大差分でも初期表示は素のテキストのままにし、span量産による描画コストを避ける。
+   */
+  function wireLazyHighlight(details, file) {
+    const lang = langOf(file.path);
+    if (!lang) return;
+    details.addEventListener("toggle", function () {
+      if (!details.open || details.dataset.highlighted) return;
+      details.dataset.highlighted = "1";
+      details.querySelectorAll("tr:not(.meta) > td.c").forEach(function (td) {
+        const text = td.textContent;
+        if (!text) return;
+        td.textContent = "";
+        appendTokens(td, text, lang);
+      });
+    });
+  }
+
   // ---------- 描画 ----------
-  function diffTable(hk) {
+  function diffTable(file, hk, deferHighlight) {
     if (!hk.lines.length) return h("div", { class: "hempty" }, hk.header);
+    const lang = deferHighlight ? null : langOf(file.path);
     const tbody = h("tbody", {});
     const trs = hunkRows(hk).map(function (r, idx) {
       const tr = h("tr", { class: r.cls, dataset: { idx: String(idx) } },
         h("td", { class: "n sel", title: "クリック=行コメント / 行番号を縦にドラッグ=範囲コメント" }, r.no),
         h("td", { class: "n sel", title: "クリック=行コメント / 行番号を縦にドラッグ=範囲コメント" }, r.nn),
         h("td", { class: "m" }, r.t === "\\" ? "" : r.t),
-        h("td", { class: "c" }, r.s));
+        codeCell(r.s, r.cls === "meta" ? null : lang));
       tbody.append(tr);
       return tr;
     });
@@ -625,16 +838,17 @@
       .map(function (fd) {
         return h("div", { class: "finding" }, h("span", { class: "chip find" }, "指摘"), h("span", {}, fd.note));
       });
-    const body = [diffTable(hk), findings];
     const collapsed = hk.collapsed || file.collapsed;
+    // 折りたたみhunkは初期描画では着色せず、展開時に遅延着色する
+    const body = [diffTable(file, hk, collapsed), findings];
     if (collapsed) {
-      return h("div", {},
-        h("details", { class: "hunk" },
-          h("summary", {}, h("div", { class: "hbar" }, barKids,
-            h("span", { class: "chip" }, "折りたたみ（" + hk.lines.length + "行）クリックで展開"),
-            h("span", { class: "spacer" }), mp.btn)),
-          body),
-        mp.wrap);
+      const det = h("details", { class: "hunk" },
+        h("summary", {}, h("div", { class: "hbar" }, barKids,
+          h("span", { class: "chip" }, "折りたたみ（" + hk.lines.length + "行）クリックで展開"),
+          h("span", { class: "spacer" }), mp.btn)),
+        body);
+      wireLazyHighlight(det, file);
+      return h("div", {}, det, mp.wrap);
     }
     return h("div", { class: "hunk" },
       h("div", { class: "hbar" }, barKids, h("span", { class: "spacer" }), mp.btn),
@@ -649,6 +863,18 @@
         h("span", {}, fb.file.path),
         fb.file.oldPath ? h("span", { class: "fold" }, "← " + fb.file.oldPath) : null),
       fb.hunks.map(function (hk) { return hunkBlock(gv, fb.file, hk); }));
+  }
+
+  /** グループの比較表（annotations.json の table）。thead/tbodyをDOM APIで組み立てる */
+  function groupTable(t) {
+    if (!t || !Array.isArray(t.headers) || !t.headers.length) return null;
+    const rows = Array.isArray(t.rows) ? t.rows : [];
+    return h("div", { class: "gtable-wrap" },
+      h("table", { class: "gtable" },
+        h("thead", {}, h("tr", {}, t.headers.map(function (x) { return h("th", {}, x); }))),
+        h("tbody", {}, rows.map(function (row) {
+          return h("tr", {}, (Array.isArray(row) ? row : [row]).map(function (cell) { return h("td", {}, cell); }));
+        }))));
   }
 
   function groupCard(gv) {
@@ -676,6 +902,7 @@
         findCount ? h("span", { class: "chip find" }, "指摘 " + findCount) : null),
       h("p", { class: "intent" }, h("b", {}, "意図: "), gv.g.intent),
       gv.notes.length ? h("ul", { class: "notes" }, gv.notes.map(function (n) { return h("li", {}, n); })) : null,
+      groupTable(gv.g.table),
       Array.from(gv.byFile.values()).map(function (fb) { return fileBlock(gv, fb); }));
   }
 
