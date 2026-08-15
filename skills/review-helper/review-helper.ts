@@ -826,7 +826,11 @@ function render(args: string[]) {
   if (!template.includes("__REVIEW_DATA__")) die("template.html に __REVIEW_DATA__ プレースホルダがありません");
   const html = template.replace("__REVIEW_DATA__", () => payload);
 
-  writeFileSync(htmlPath, html);
+  // 原子的に書き込む（temp+rename）。serve配信中の画面は /api/state のmtime変化で即リロードするため、
+  // truncate-then-write だと書き込み途中の不完全なHTMLを配信し得る
+  const tempPath = `${htmlPath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, html);
+  renameSync(tempPath, htmlPath);
   console.log(`[review-helper] 生成完了${draft ? "（暫定・解説なし）" : ""}: ${htmlPath}`);
   console.log(`  グループ: ${anno.groups.length} / hunk: ${diff.stats.hunks}（全hunk割り当て済みを検証OK）`);
   if (draft) console.log(`  暫定画面です。annotations.json を書いて render を再実行すると、serve配信中の画面は自動で解説つきに更新されます`);
