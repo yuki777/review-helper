@@ -182,3 +182,15 @@ review-helper.test.ts  # 統合テスト（bun test）
   同じリポジトリで `serve` を再実行する。
 - `serve --once` は人間のレビュー完了までブロックするため、エージェントのコマンドタイムアウトが
   短い環境ではバックグラウンド実行＋ログ監視に切り替えること。
+
+## バージョンアップ（作者向け）
+
+リリースは [tagpr](https://github.com/Songmu/tagpr) で自動化されている。バージョンの正（唯一の管理場所）は `.claude-plugin/plugin.json` の `version` のみで、`.claude-plugin/marketplace.json` には `version` を持たせない。複数箇所で管理すると更新漏れによる不一致が起きるため、変更先は `plugin.json` に一本化する。
+
+1. 通常のPRを main にマージすると、tagpr がリリースPR（`.claude-plugin/plugin.json` の `version` を次のバージョンに書き換えたPR）を自動作成・更新する
+2. リリースしたいタイミングで、そのリリースPRをマージする
+3. タグ（例: `v0.2.3`）と GitHub Release が自動作成される
+
+バージョンの上げ幅はデフォルトで patch。minor / major にしたい場合は、取り込むPRに `minor` / `major` ラベルを付けるか、リリースPRに `tagpr:minor` / `tagpr:major` ラベルを付ける。
+
+利用者への更新配信は、main 上の `plugin.json` の `version` が変わったかどうかで判定される。そのため、通常のPRをマージしただけでは新しい内容は利用者に届かない。リリースPRのマージを忘れないこと。利用者は `/plugin update review-helper` で最新版に更新できる。
