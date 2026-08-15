@@ -113,6 +113,15 @@ const LOCKFILE_RE =
 const COLLAPSE_HUNK_LINES = 400;
 /** これを超える未追跡ファイルは本文を省略する（バイト） */
 const MAX_UNTRACKED_BYTES = 1_000_000;
+/** 質問/指摘に添付できる画像の上限（1回の送信あたりの枚数） */
+const MAX_ATTACHMENTS = 10;
+/** 添付画像1枚あたりのデコード後バイト数の上限 */
+const MAX_ATTACHMENT_BYTES = 5_000_000;
+/** 受理する添付画像の形式。MIMEに加えて先頭バイト（マジックナンバー）でも中身を検証する */
+const ATTACHMENT_TYPES: Record<string, { ext: string; magic: number[] }> = {
+  "image/png": { ext: "png", magic: [0x89, 0x50, 0x4e, 0x47] },
+  "image/jpeg": { ext: "jpg", magic: [0xff, 0xd8, 0xff] },
+};
 
 // ---------- 共通ユーティリティ ----------
 
@@ -876,6 +885,60 @@ const LOADING_HTML = `<!doctype html>
 
 // ---------- serve ----------
 
+interface DecodedAttachment {
+  name: string;
+  type: string;
+  ext: string;
+  bytes: Buffer;
+}
+
+/**
+ * 画面から送られた添付画像（Base64）を検証してデコードする。
+ * 1件でも不正があれば送信全体を拒否する（--once の受理枠を消費させないため、保存前に呼ぶこと）。
+ */
+function decodeAttachments(
+  raw: unknown,
+): { ok: true; files: DecodedAttachment[] } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, files: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: "attachments は配列で指定してください" };
+  if (raw.length > MAX_ATTACHMENTS) {
+    return { ok: false, error: `添付できる画像は1回の送信で${MAX_ATTACHMENTS}枚までです` };
+  }
+  const files: DecodedAttachment[] = [];
+  for (const [i, item] of raw.entries()) {
+    const label = `画像${i + 1}`;
+    if (typeof item !== "object" || item === null) {
+      return { ok: false, error: `${label}: 添付の形式が不正です` };
+    }
+    const { name, type, data } = item as { name?: unknown; type?: unknown; data?: unknown };
+    const spec = typeof type === "string" ? ATTACHMENT_TYPES[type] : undefined;
+    if (!spec) return { ok: false, error: `${label}: 添付できる画像は PNG / JPEG のみです` };
+    if (typeof data !== "string" || !data) {
+      return { ok: false, error: `${label}: 画像データがありません` };
+    }
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.byteLength === 0) {
+      return { ok: false, error: `${label}: 画像データ（Base64）を解読できませんでした` };
+    }
+    if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+      return {
+        ok: false,
+        error: `${label}: 画像は1枚あたり${Math.floor(MAX_ATTACHMENT_BYTES / 1_000_000)}MBまでです`,
+      };
+    }
+    // MIME申告と実際の中身の食い違い（画像を装った別データ）を先頭バイトで弾く
+    if (!spec.magic.every((b, j) => bytes[j] === b)) {
+      return { ok: false, error: `${label}: 画像の中身が ${type} ではありません` };
+    }
+    // 表示用の元ファイル名。制御文字を除去し、長すぎる名前は切り詰める（保存名には使わない）
+    const safeName =
+      (typeof name === "string" ? name : "").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120) ||
+      `${label}.${spec.ext}`;
+    files.push({ name: safeName, type, ext: spec.ext, bytes });
+  }
+  return { ok: true, files };
+}
+
 /**
  * review.html をローカル配信し、画面の「指摘を送信」（POST /api/comments）を受け付ける。
  * 受信した指摘は comments.json（受信箱）に保存し、標準出力にも出す。
@@ -902,6 +965,7 @@ function serve(args: string[]) {
     return {
       htmlPath: join(dir, "review.html"),
       commentsPath: join(dir, "comments.json"),
+      attachDir: join(dir, "attachments"),
       diffPath: join(dir, "diff.json"),
     };
   };
@@ -945,7 +1009,7 @@ function serve(args: string[]) {
             if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
               return new Response("forbidden", { status: 403 });
             }
-            let body: { prompt?: string; stateKey?: string };
+            let body: { prompt?: string; stateKey?: string; attachments?: unknown };
             try {
               body = await req.json();
             } catch {
@@ -965,16 +1029,53 @@ function serve(args: string[]) {
               console.log(`[review-helper] 古い画面からの送信を拒否しました（stateKey不一致）`);
               return Response.json({ error: "stale-state" }, { status: 409 });
             }
+            // 添付画像は保存前にまとめて検証する（不正が1件でもあれば全体を400で拒否し、--onceの受理枠を消費しない）
+            const att = decodeAttachments(body.attachments);
+            if (!att.ok) {
+              return Response.json({ error: att.error }, { status: 400 });
+            }
             // --once: 最初の1件のみ受理。チェックと確定の間にawaitを挟まないこと（並行POSTの二重受理防止）
             if (once && accepted) {
               return Response.json({ error: "already-accepted" }, { status: 409 });
             }
             if (once) accepted = true;
-            const { commentsPath } = pathsNow();
-            writeFileSync(commentsPath, JSON.stringify(body, null, 2));
+            const { commentsPath, attachDir } = pathsNow();
+            // 添付画像を保存する。受信箱と同じく「最新の送信」だけを正とするため、前回の添付は毎回置き換える
+            let savedAttachments: { label: string; name: string; type: string; path: string; bytes: number }[] = [];
+            if (att.files.length) {
+              rmSync(attachDir, { recursive: true, force: true });
+              mkdirSync(attachDir, { recursive: true });
+              const stamp = Date.now();
+              savedAttachments = att.files.map((f, i) => {
+                const path = join(attachDir, `img-${stamp}-${i + 1}.${f.ext}`);
+                writeFileSync(path, f.bytes);
+                return { label: `画像${i + 1}`, name: f.name, type: f.type, path, bytes: f.bytes.byteLength };
+              });
+            }
+            // プロンプト末尾に保存先を追記する（受信したエージェントは画像読取ツールでこのパスを開く）
+            let prompt = body.prompt;
+            if (savedAttachments.length) {
+              prompt += [
+                "",
+                "",
+                "## 添付画像",
+                "以下の画像が添付されています。画像読取ツールで開いて内容を確認してください。",
+                ...savedAttachments.map((a) => `- ${a.label}: ${a.path}（元ファイル名: ${a.name}）`),
+              ].join("\n");
+            }
+            // 受信箱にはBase64本文を残さず、保存済みファイルへのパスだけを書く（受信箱の肥大化防止）
+            const saved = {
+              ...body,
+              prompt,
+              attachments: savedAttachments.length ? savedAttachments : undefined,
+            };
+            writeFileSync(commentsPath, JSON.stringify(saved, null, 2));
             console.log(`\n[review-helper] 指摘を受信しました → ${commentsPath}`);
+            if (savedAttachments.length) {
+              console.log(`[review-helper] 添付画像 ${savedAttachments.length} 枚を保存しました → ${attachDir}`);
+            }
             console.log(`---- 指摘プロンプト ここから ----`);
-            console.log(body.prompt);
+            console.log(prompt);
             console.log(`---- 指摘プロンプト ここまで ----`);
             if (once) {
               // レスポンスを返しきってから終了する

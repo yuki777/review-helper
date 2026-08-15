@@ -758,3 +758,77 @@ test("serve --fresh は前回のreview.htmlを配信せず、起動後のrender�
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("serve は添付画像を検証して保存し、受信箱とプロンプトに保存先パスを載せる", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-attach-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+    expect(run(["extract"], repo).code).toBe(0);
+    writeAnnotations(repo);
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+
+    // 画面側: serve配信時のみ有効な添付UI（「画像を添付」）がテンプレートに含まれる
+    expect(readFileSync(join(reviewDir(repo), "review.html"), "utf-8")).toContain("画像を添付");
+
+    // 1x1 PNG（マジックナンバー 89 50 4E 47 で始まる正規の画像）
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const key = stateKeyOf(repo);
+    const { proc, base } = await startServe(repo, "46290");
+    try {
+      const post = (attachments: unknown) =>
+        fetch(`${base}/api/comments`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: base },
+          body: JSON.stringify({ prompt: "表示が崩れています（添付画像1）", stateKey: key, items: [], attachments }),
+        });
+
+      // PNG/JPEG以外の形式は400で拒否され、受信箱は作られない
+      const badType = await post([{ name: "x.gif", type: "image/gif", data: pngBase64 }]);
+      expect(badType.status).toBe(400);
+      const badTypeBody = await badType.json(); // Response.json() は any を返すためキャスト不要
+      expect(badTypeBody.error).toContain("PNG / JPEG");
+
+      // MIME申告と中身が食い違うデータ（画像を装った別データ）は400で拒否される
+      const fake = await post([{ name: "x.png", type: "image/png", data: Buffer.from("not-an-image").toString("base64") }]);
+      expect(fake.status).toBe(400);
+      const fakeBody = await fake.json();
+      expect(fakeBody.error).toContain("中身");
+
+      // 枚数上限（10枚）を超える送信は400で拒否される
+      const many = await post(Array.from({ length: 11 }, () => ({ type: "image/png", data: pngBase64 })));
+      expect(many.status).toBe(400);
+      expect(existsSync(join(reviewDir(repo), "comments.json"))).toBe(false);
+
+      // 正規の添付: 保存され、受信箱とプロンプトに保存先パスが載る
+      const ok = await post([{ name: "screenshot.png", type: "image/png", data: pngBase64 }]);
+      expect(ok.ok).toBe(true);
+      const inboxRaw = readFileSync(join(reviewDir(repo), "comments.json"), "utf-8");
+      const inbox = JSON.parse(inboxRaw);
+      expect(inbox.attachments).toHaveLength(1);
+      const att = inbox.attachments[0];
+      expect(att.label).toBe("画像1");
+      expect(att.name).toBe("screenshot.png");
+      expect(att.path).toContain(join(reviewDir(repo), "attachments"));
+      // 保存ファイルの中身が送信した画像と一致する
+      expect(readFileSync(att.path).equals(Buffer.from(pngBase64, "base64"))).toBe(true);
+      // 受信箱にBase64本文は残さない（肥大化防止）
+      expect(inboxRaw).not.toContain(pngBase64);
+      // プロンプト末尾に保存先パスの案内が追記される（エージェントは画像読取ツールでこのパスを開く）
+      expect(inbox.prompt).toContain("## 添付画像");
+      expect(inbox.prompt).toContain(att.path);
+
+      // 再送信すると前回の添付は置き換えられる（受信箱と同じ「最新の送信が正」の意味論）
+      const again = await post([{ name: "retake.png", type: "image/png", data: pngBase64 }]);
+      expect(again.ok).toBe(true);
+      const inbox2 = JSON.parse(readFileSync(join(reviewDir(repo), "comments.json"), "utf-8"));
+      expect(existsSync(att.path)).toBe(false);
+      expect(existsSync(inbox2.attachments[0].path)).toBe(true);
+    } finally {
+      proc.kill();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

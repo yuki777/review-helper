@@ -110,6 +110,11 @@
              font-size: 12px; color: var(--muted); cursor: pointer; }
   .memowrap textarea { width: 100%; margin-top: 6px; min-height: 64px; border: 1px solid var(--border);
                        border-radius: 6px; padding: 8px; font: inherit; font-size: 13px; }
+  .attachbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+  .attachchip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+                border-radius: 6px; padding: 3px 6px; font-size: 12px; background: #fff; color: var(--muted); }
+  .attachchip img { height: 28px; border-radius: 4px; display: block; }
+  .attachchip button { border: none; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; }
   .spacer { flex: 1; }
   td.n.sel { cursor: pointer; }
   td.n.sel:hover { background: #cfe3ff !important; }
@@ -151,6 +156,92 @@
   const SERVED = location.protocol === "http:" || location.protocol === "https:";
   // 暫定画面（render --draft）: 解説なしのファイル単位表示。承認・送信は本注釈の完成後に有効化する
   const DRAFT = !!data.draft;
+
+  // ---------- 画像添付（質問/指摘へのスクリーンショット添付） ----------
+  // serve配信時のみ有効（file://では送信できないため、添付UI自体を出さない）。
+  // 画像はlocalStorageに入れず、このタブのメモリにだけ保持する（容量制限と受信箱の肥大化を避ける）。
+  const CAN_ATTACH = SERVED && !DRAFT;
+  const MAX_ATTACH_COUNT = 10;
+  const MAX_ATTACH_BYTES = 5 * 1000 * 1000;
+  const ATTACH_TYPES = { "image/png": true, "image/jpeg": true };
+  const attachMap = new Map(); // キー("context" / "memo:<hunkId>" / 行コメントobject) -> 添付の配列
+
+  function attachmentsOf(key) {
+    return attachMap.get(key) || [];
+  }
+  function totalAttachments() {
+    let n = 0;
+    attachMap.forEach(function (arr) { n += arr.length; });
+    return n;
+  }
+  function renderAttachBar(key, bar) {
+    bar.textContent = "";
+    attachmentsOf(key).forEach(function (a, i) {
+      const del = h("button", { title: "この画像を外す" }, "×");
+      del.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        const arr = attachmentsOf(key);
+        arr.splice(i, 1);
+        if (!arr.length) attachMap.delete(key);
+        renderAttachBar(key, bar);
+        updateCopyBtn();
+      });
+      bar.append(h("span", { class: "attachchip" },
+        h("img", { src: a.dataUrl, alt: a.name }),
+        h("span", {}, a.name),
+        del));
+    });
+    bar.hidden = !attachmentsOf(key).length;
+  }
+  function addAttachment(key, file, bar) {
+    if (!ATTACH_TYPES[file.type]) { alert("添付できる画像は PNG / JPEG のみです"); return; }
+    if (file.size > MAX_ATTACH_BYTES) { alert("画像は1枚あたり5MBまでです: " + (file.name || "")); return; }
+    if (totalAttachments() >= MAX_ATTACH_COUNT) { alert("添付は1回の送信で合計" + MAX_ATTACH_COUNT + "枚までです"); return; }
+    const reader = new FileReader();
+    reader.onload = function () {
+      const arr = attachmentsOf(key);
+      arr.push({ name: file.name || "クリップボード画像", type: file.type, dataUrl: reader.result });
+      attachMap.set(key, arr);
+      renderAttachBar(key, bar);
+      updateCopyBtn();
+    };
+    reader.readAsDataURL(file);
+  }
+  /**
+   * メモ欄用の添付UI一式（「画像を添付」ボタン・添付一覧・textareaへの画像ペースト受け付け）。
+   * serve配信時以外は何も付けない（controls/barはnull、wireは何もしない）。
+   */
+  function attachParts(key) {
+    if (!CAN_ATTACH) return { controls: null, bar: null, wire: function () {} };
+    const bar = h("div", { class: "attachbar", hidden: true });
+    const input = h("input", { type: "file", accept: "image/png,image/jpeg", multiple: true, hidden: true });
+    input.addEventListener("change", function () {
+      Array.from(input.files || []).forEach(function (f) { addAttachment(key, f, bar); });
+      input.value = "";
+    });
+    const btn = h("button", {
+      class: "memobtn",
+      title: "表示崩れ等のスクリーンショット（PNG/JPEG、1枚5MBまで）を添付します。メモ欄への画像ペーストでも追加できます。" +
+             "画像はこのタブのメモリにのみ保持され、画面のリロードで消えます（メモの文章は保持されます）",
+    }, "画像を添付");
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      input.click();
+    });
+    return {
+      controls: h("div", { class: "attachbar" }, btn, input),
+      bar: bar,
+      wire: function (ta) {
+        ta.addEventListener("paste", function (ev) {
+          const files = Array.from((ev.clipboardData && ev.clipboardData.files) || [])
+            .filter(function (f) { return ATTACH_TYPES[f.type]; });
+          if (!files.length) return;
+          ev.preventDefault();
+          files.forEach(function (f) { addAttachment(key, f, bar); });
+        });
+      },
+    };
+  }
 
   // ---------- 状態（承認・メモ）: diff内容のハッシュをキーにlocalStorageへ ----------
   let state = { approved: {}, memos: {}, lines: {}, contextMemo: "" };
@@ -230,21 +321,47 @@
   function collectMemos() {
     const items = [];
     const contextMemo = (state.contextMemo || "").trim();
-    if (contextMemo) items.push({ scope: "context", memo: contextMemo });
+    const contextAtt = attachmentsOf("context");
+    // テキストが空でも画像だけの質問/指摘を許す（スクリーンショットが本体のケース）
+    if (contextMemo || contextAtt.length) {
+      items.push({ scope: "context", memo: contextMemo, att: contextAtt });
+    }
     for (const gv of groups) {
       for (const id of gv.ids) {
         const m = (state.memos[id] || "").trim();
         const e = hunkIndex.get(id);
         if (!e) continue;
-        if (m) items.push({ scope: "hunk", id: id, memo: m, gv: gv, e: e, lines: null });
+        const memoAtt = attachmentsOf("memo:" + id);
+        if (m || memoAtt.length) {
+          items.push({ scope: "hunk", id: id, memo: m, gv: gv, e: e, lines: null, att: memoAtt });
+        }
         for (const c of state.lines[id] || []) {
-          if ((c.text || "").trim()) {
-            items.push({ scope: "hunk", id: id, memo: c.text.trim(), gv: gv, e: e, lines: c });
+          const lineAtt = attachmentsOf(c);
+          if ((c.text || "").trim() || lineAtt.length) {
+            items.push({ scope: "hunk", id: id, memo: (c.text || "").trim(), gv: gv, e: e, lines: c, att: lineAtt });
           }
         }
       }
     }
     return items;
+  }
+  /** 各itemの添付に送信順で「画像1..N」のラベルを振り、送信ペイロード用のフラット配列を返す */
+  function numberAttachments(items) {
+    const flat = [];
+    items.forEach(function (it) {
+      it.attLabels = (it.att || []).map(function (a) {
+        flat.push(a);
+        return "画像" + flat.length;
+      });
+    });
+    return flat;
+  }
+  /** itemの添付画像を「添付画像: 画像N（ファイル名）」の1行にする（無ければnull） */
+  function attachmentLine(it) {
+    if (!it.attLabels || !it.attLabels.length) return null;
+    return "添付画像: " + it.attLabels.map(function (lb, i) {
+      return lb + "（" + it.att[i].name + "）";
+    }).join(" / ");
   }
   function buildPrompt(items) {
     const L = [];
@@ -267,7 +384,9 @@
             return (l.label ? l.label + " " : "") + l.url;
           }).join(" / "));
         }
-        L.push("内容: " + it.memo, "");
+        const ctxAtt = attachmentLine(it);
+        if (ctxAtt) L.push(ctxAtt);
+        L.push("内容: " + (it.memo || "（添付画像を参照）"), "");
         return;
       }
       const label = it.lines ? ":" + lineLabel(it.e.hunk, it.lines.from, it.lines.to) : "";
@@ -283,7 +402,9 @@
         if (!it.lines && it.e.hunk.lines.length > 30) L.push("(以下 " + (it.e.hunk.lines.length - 30) + " 行省略)");
         L.push("```");
       }
-      L.push("内容: " + it.memo, "");
+      const hunkAtt = attachmentLine(it);
+      if (hunkAtt) L.push(hunkAtt);
+      L.push("内容: " + (it.memo || "（添付画像を参照）"), "");
     });
     return L.join("\n");
   }
@@ -314,7 +435,12 @@
   async function copyMemos() {
     const items = collectMemos();
     if (!items.length) return;
-    const text = buildPrompt(items);
+    const flat = numberAttachments(items);
+    let text = buildPrompt(items);
+    if (flat.length) {
+      // コピーには画像本体を含められない。誤解を防ぐため明記する
+      text += "\n\n## 添付画像\n添付画像は「質問/指摘を送信」（serve経由）でのみ届きます。このコピーには含まれていません。";
+    }
     window.__lastReviewPrompt = text; // 動作確認用フック
     await copyText(text);
     const btn = document.getElementById("copybtn");
@@ -325,6 +451,7 @@
   async function sendMemos() {
     const items = collectMemos();
     if (!items.length) return;
+    const flat = numberAttachments(items);
     const sb = document.getElementById("sendbtn");
     if (sb.disabled) return;
     sb.disabled = true; // fetch前に無効化（二重送信ガード）
@@ -333,6 +460,10 @@
       sentAt: new Date().toISOString(),
       stateKey: data.stateKey,
       title: anno.title,
+      attachments: flat.length ? flat.map(function (a) {
+        // dataUrl（data:image/png;base64,....）からBase64本文だけを送る
+        return { name: a.name, type: a.type, data: String(a.dataUrl).split(",")[1] || "" };
+      }) : undefined,
       prompt: buildPrompt(items),
       items: items.map(function (it) {
         if (it.scope === "context") {
@@ -340,6 +471,7 @@
             scope: "context",
             section: "背景・コンテキスト / レビュー全体",
             memo: it.memo,
+            attachments: it.attLabels.length ? it.attLabels : undefined,
           };
         }
         return {
@@ -350,6 +482,7 @@
           group: it.gv.g.title,
           lines: it.lines ? lineLabel(it.e.hunk, it.lines.from, it.lines.to) : null,
           memo: it.memo,
+          attachments: it.attLabels.length ? it.attLabels : undefined,
         };
       }),
     };
@@ -364,6 +497,9 @@
         sb.textContent = err.error === "stale-state"
           ? "画面が古い差分です（ページをリロードしてください）"
           : "受理済み（再送は拒否されました）";
+      } else if (r.status === 400) {
+        const err = await r.json().catch(function () { return {}; });
+        sb.textContent = "送信できません: " + (err.error || "入力が不正です");
       } else if (!r.ok) {
         throw new Error("HTTP " + r.status);
       } else {
@@ -398,10 +534,12 @@
       },
     });
     ta.value = state.contextMemo || "";
+    const ap = attachParts("context");
+    ap.wire(ta);
     const wrap = h("div", {
       class: "memoarea memowrap context-memo",
       hidden: !ta.value,
-    }, ta);
+    }, ta, ap.controls, ap.bar);
     const btn = h("button", {
       class: "memobtn",
       onclick: function (ev) {
@@ -524,6 +662,8 @@
   function commentRow(hk, trs, c) {
     const ta = h("textarea", { placeholder: "この行（範囲）への質問・指摘。入力は自動保存されます" });
     ta.value = c.text || "";
+    const ap = attachParts(c); // 行コメントはlocalStorage上のオブジェクト自体をキーにする
+    ap.wire(ta);
     ta.addEventListener("input", function () {
       c.text = ta.value;
       saveState();
@@ -537,11 +677,12 @@
             h("span", { class: "chip line" }, "行コメント"),
             h("span", {}, hk.id + " " + lineLabel(hk, c.from, c.to)),
             del),
-          ta)));
+          ta, ap.controls, ap.bar)));
     del.addEventListener("click", function () {
       const arr = state.lines[hk.id] || [];
       const i = arr.indexOf(c);
       if (i >= 0) arr.splice(i, 1);
+      attachMap.delete(c); // 行コメント削除時は添付も破棄する
       saveState();
       updateCopyBtn();
       markRange(trs, c, false);
@@ -825,7 +966,9 @@
       },
     });
     ta.value = state.memos[hk.id] || "";
-    const wrap = h("div", { class: "memoarea memowrap", hidden: !ta.value }, ta);
+    const ap = attachParts("memo:" + hk.id);
+    ap.wire(ta);
+    const wrap = h("div", { class: "memoarea memowrap", hidden: !ta.value }, ta, ap.controls, ap.bar);
     const btn = h("button", {
       class: "memobtn",
       onclick: function (ev) {
