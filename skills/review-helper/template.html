@@ -933,7 +933,8 @@
 
   document.title = anno.title + " — DIFF REVIEW";
   const app = document.getElementById("app");
-  app.append(
+  // 素の append() は null を文字列 "null" として描画してしまうため、条件付き要素はfilterで除く
+  app.append(...[
     h("header", { class: "topbar" },
       h("div", { class: "brand" }, "DIFF REVIEW"),
       h("div", { class: "title" }, anno.title),
@@ -973,7 +974,8 @@
       h("h2", {}, "02 / 変更グループ詳細"),
       groups.map(groupCard)),
     h("footer", {}, "review-helper / 状態キー: " + data.stateKey +
-      "（承認・メモはこのブラウザ内にのみ保存。diffが変わると自動リセット）"));
+      "（承認・メモはこのブラウザ内にのみ保存。diffが変わると自動リセット）"),
+  ].filter(function (x) { return x !== null; }));
 
   updateProgress();
   updateCopyBtn();
