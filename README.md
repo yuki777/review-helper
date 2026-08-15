@@ -17,8 +17,16 @@ Claude Codeプラグインとして配布する（Codex CLIからも同じ手順
 extract（機械） → diff.json（全hunkにID付番・統計を機械集計）
                  → LLMが annotations.json を書く（グループ分け・意図・指摘。hunk IDで参照）
 render（機械）  → 検証（全hunkの割り当て漏れ・重複をチェック） → review.html
+                 --draft でLLMを待たずに暫定画面（ファイル単位・解説なし）も生成できる
 serve（機械）   → 画面を配信し、「質問/指摘を送信」を受信箱（comments.json）へ保存
+                 review.html 不在でも起動でき（準備中画面）、render完了で画面が自動で切り替わる
+                 --fresh で「serve起動後のrender」まで準備中に固定（前回の残骸を見せない）
 ```
+
+LLM推論が必要なのは annotations.json の執筆だけ。Webサーバの起動とdiff表示は推論を待たない。
+推奨フローでは serve を先に起動し、extract + `render --draft` で人間がすぐdiffを読み始め、
+LLMの解説が完成すると画面が自動で解説つきに更新される（メモ・行コメントは引き継がれる。
+承認・送信は解説の完成後に有効化）。
 
 - LLMはdiff本文を書き写さないため、差分表示と統計値は常に正確。
 - レビュー画面では、変更を意図単位のグループで確認し、グループごとに「確認して承認」する。
@@ -92,15 +100,21 @@ bun skills/review-helper/review-helper.ts extract [main...feature など]
 #     PR URLは自動判別されるのでそのまま渡せばよい（番号だけ指定する場合は --pr 123）
 bun skills/review-helper/review-helper.ts extract https://github.com/owner/repo/pull/123
 
+# 1''.（推奨）LLMの注釈を待たずにdiffを見る: serveを先に起動し、暫定画面を生成する
+#     --fresh は前回レビューのreview.htmlが残っていても配信せず、今回のrenderまで準備中画面に固定する
+#     以後、render のたびにブラウザの画面が自動で最新に切り替わる
+bun skills/review-helper/review-helper.ts serve --once --fresh &
+bun skills/review-helper/review-helper.ts render --draft --no-open
+
 # 2. エージェントに skills/review-helper/SKILL.md の手順で annotations.json を書かせる
 
-# 3. 生成（検証エラーがあればIDつきで表示される）
+# 3. 生成（検証エラーがあればIDつきで表示される）。serve配信中なら画面は自動更新される
 bun skills/review-helper/review-helper.ts render [--no-open]
 
 # 既定ブラウザ以外で開きたい場合（macOS）: アプリ名を環境変数に設定
 REVIEW_HELPER_BROWSER=Comet bun skills/review-helper/review-helper.ts render
 
-# 4.（任意）待機型: 送信待ちサーバを起動（実行したエージェント自身が受信者になる）
+# 4.（serveを先に起動していない場合）待機型: 送信待ちサーバを起動
 bun skills/review-helper/review-helper.ts serve --once   # 「質問/指摘を送信」を受けて内容を出力し終了
 ```
 
@@ -158,6 +172,10 @@ review-helper.test.ts  # 統合テスト（bun test）
 - 同じPRを複数のclone/worktreeから同時に更新する運用は対象外（同じPRの保存先を共有する）。
 - 承認状態はブラウザのlocalStorage保存（ブラウザごとに独立）。diff内容が変わると自動リセットされる。
 - 「質問/指摘を送信」ボタンは serve（http）経由で開いたときのみ表示される。file:// では「質問/指摘をコピー」を使う。
+- 画面の自動更新（準備中→暫定→解説つき）は serve（http）経由で開いたときのみ働く
+  （画面が `/api/state` をポーリングする）。file:// で開いた場合は手動で開き直す。
+- 暫定画面（`render --draft`）ではグループ承認と「質問/指摘を送信」は無効
+  （グループ構成が本注釈で変わるため）。メモ・行コメントは本注釈の画面へ引き継がれる。
 - `serve` を終了しても `review.html` は削除されない。パスはレビュー画面の
   「00 / 背景とコンテキスト」に常時表示され、送信後はトップバーの「HTMLパスをコピー」でも
   取得できる。ファイルを直接開けば再閲覧でき、「質問/指摘を送信」が必要な場合は

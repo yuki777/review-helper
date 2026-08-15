@@ -637,3 +637,124 @@ test("renderはreview.htmlのPathを画面データに埋め込み、画面に�
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("render --draft はannotations.jsonなしで暫定画面を生成し、本renderで置き換わる", () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-draft-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+    expect(run(["extract"], repo).code).toBe(0);
+
+    // annotations.json なしでも --draft なら成功する（--draft なしは従来どおり失敗）
+    expect(run(["render", "--no-open"], repo).code).not.toBe(0);
+    const draft = run(["render", "--draft", "--no-open"], repo);
+    expect(draft.code).toBe(0);
+    expect(draft.out).toContain("暫定");
+
+    const htmlPath = join(reviewDir(repo), "review.html");
+    const draftHtml = readFileSync(htmlPath, "utf-8");
+    expect(draftHtml).toContain('"draft":true');
+    expect(draftHtml).toContain("解説を生成中"); // 暫定タイトル（ファイル単位グループ）
+    const draftStateKey = stateKeyOf(repo);
+
+    // 本注釈でrenderすると draft フラグが消え、stateKeyは同一（メモ・行コメントが引き継がれる契約）
+    writeAnnotations(repo);
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+    const finalHtml = readFileSync(htmlPath, "utf-8");
+    expect(finalHtml).not.toContain('"draft":true');
+    expect(stateKeyOf(repo)).toBe(draftStateKey);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+/** serveを起動し、起動バナーからベースURLを取り出す（テスト用ヘルパー） */
+async function startServe(repo: string, port: string, extraArgs: string[] = []) {
+  const proc = Bun.spawn(["bun", CLI, "serve", "--no-open", "--port", port, ...extraArgs], {
+    cwd: repo,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, XDG_DATA_HOME: TEST_DATA_HOME },
+  });
+  const decoder = new TextDecoder();
+  const reader = proc.stdout.getReader();
+  let output = "";
+  while (!output.includes("レビューサーバ起動")) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    output += decoder.decode(value, { stream: true });
+  }
+  const m = output.match(/レビューサーバ起動: (http:\/\/127\.0\.0\.1:\d+)\//);
+  if (!m) {
+    const errorOutput = await new Response(proc.stderr).text();
+    proc.kill();
+    throw new Error(`起動バナーが見つかりません: ${output}${errorOutput}`);
+  }
+  return { proc, base: m[1] };
+}
+
+test("server-first: serve→extract→render --draft の順でも準備中画面から自動で切り替わる", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-loading-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+
+    // extractより先にserveを起動する（server-first）
+    const { proc, base } = await startServe(repo, "46090");
+    try {
+      // review.html不在: 準備中画面（外部リソースなし）と ready:false
+      const shell = await (await fetch(`${base}/`)).text();
+      expect(shell).toContain("準備しています");
+      expect(shell).not.toContain("http://"); // 外部リソース参照なし（相対パスのfetchのみ）
+      const before = await (await fetch(`${base}/api/state`)).json();
+      expect(before.ready).toBe(false);
+
+      // serve起動後の extract → render --draft が反映される
+      expect(run(["extract"], repo).code).toBe(0);
+      expect(run(["render", "--draft", "--no-open"], repo).code).toBe(0);
+      const after = await (await fetch(`${base}/api/state`)).json();
+      expect(after.ready).toBe(true);
+      expect(typeof after.mtime).toBe("number");
+      const page = await (await fetch(`${base}/`)).text();
+      expect(page).toContain('"draft":true');
+    } finally {
+      proc.kill();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("serve --fresh は前回のreview.htmlを配信せず、起動後のrenderまで準備中に固定する", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "review-helper-fresh-test-"));
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: repo }).exitCode).toBe(0);
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+
+    // 前回レビューの残骸を作る（extract→注釈→render）
+    expect(run(["extract"], repo).code).toBe(0);
+    writeAnnotations(repo);
+    expect(run(["render", "--no-open"], repo).code).toBe(0);
+    expect(existsSync(join(reviewDir(repo), "review.html"))).toBe(true);
+
+    const { proc, base } = await startServe(repo, "46190", ["--fresh"]);
+    try {
+      // 残骸のreview.htmlがあっても、--fresh は準備中画面に固定する（古い差分を見せない）
+      const shell = await (await fetch(`${base}/`)).text();
+      expect(shell).toContain("準備しています");
+      const before = await (await fetch(`${base}/api/state`)).json();
+      expect(before.ready).toBe(false);
+
+      // serve起動後のrenderで配信が解禁される
+      expect(run(["render", "--draft", "--no-open"], repo).code).toBe(0);
+      const after = await (await fetch(`${base}/api/state`)).json();
+      expect(after.ready).toBe(true);
+      const page = await (await fetch(`${base}/`)).text();
+      expect(page).toContain('"draft":true');
+    } finally {
+      proc.kill();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
