@@ -749,14 +749,36 @@ function validateAnnotations(anno: Annotations, diff: DiffDoc): { errors: string
   return { errors, warnings };
 }
 
+/**
+ * annotations.json なしで先にdiffを閲覧するための暫定注釈（render --draft）。
+ * 1ファイル=1グループの機械的な割り当てで、LLM推論を待たずに画面を生成できる。
+ * 本注釈が完成したら通常の render で上書きする（stateKeyはdiff由来のため、メモ・行コメントは維持される）。
+ */
+function draftAnnotations(diff: DiffDoc): Annotations {
+  return {
+    title: `${diff.rangeLabel}（解説を生成中）`,
+    summary:
+      "エージェントが解説（グループ分け・意図・指摘）を生成中です。diff本文と統計は確定済みのため、先に確認できます。",
+    groups: diff.files.map((f) => ({
+      title: f.path,
+      kind: "other",
+      risk: "low",
+      intent:
+        "暫定表示（ファイル単位のグループ）。解説の生成が完了すると、意図単位のグループに自動で置き換わります。",
+      hunks: f.hunks.map((hk) => hk.id),
+    })),
+  };
+}
+
 function render(args: string[]) {
   const { outDir } = repoPaths();
   const noOpen = args.includes("--no-open");
+  const draft = args.includes("--draft");
 
   const diffPath = join(outDir, "diff.json");
   const annoPath = join(outDir, "annotations.json");
   if (!existsSync(diffPath)) die(`diff.json がありません。先に extract を実行してください: ${diffPath}`);
-  if (!existsSync(annoPath)) die(`annotations.json がありません。diff.json を読んで注釈を書いてください: ${annoPath}`);
+  if (!draft && !existsSync(annoPath)) die(`annotations.json がありません。diff.json を読んで注釈を書いてください: ${annoPath}`);
 
   const diffRaw = readFileSync(diffPath, "utf-8");
   let diff: DiffDoc;
@@ -766,10 +788,15 @@ function render(args: string[]) {
   } catch (e) {
     die(`diff.json のJSONが壊れています: ${e}`);
   }
-  try {
-    anno = JSON.parse(readFileSync(annoPath, "utf-8"));
-  } catch (e) {
-    die(`annotations.json のJSONが壊れています: ${e}`);
+  if (draft) {
+    // 暫定モード: LLMの注釈を待たず、機械生成の注釈で先に画面を作る
+    anno = draftAnnotations(diff);
+  } else {
+    try {
+      anno = JSON.parse(readFileSync(annoPath, "utf-8"));
+    } catch (e) {
+      die(`annotations.json のJSONが壊れています: ${e}`);
+    }
   }
 
   const { errors, warnings } = validateAnnotations(anno, diff);
@@ -788,6 +815,7 @@ function render(args: string[]) {
   const combined = {
     generatedAt: new Date().toISOString(),
     stateKey: fnv1a(stableDiffJson(diff)), // 同じdiffなら承認状態を維持、diffが変われば自動リセット（createdAt等は含めない）
+    ...(draft ? { draft: true } : {}), // 暫定画面: 承認・送信を無効化し、本renderで自動更新される
     diff,
     annotations: anno,
     commentsPath: join(outDir, "comments.json"), // 画面の「受信箱パスをコピー」用
@@ -798,9 +826,14 @@ function render(args: string[]) {
   if (!template.includes("__REVIEW_DATA__")) die("template.html に __REVIEW_DATA__ プレースホルダがありません");
   const html = template.replace("__REVIEW_DATA__", () => payload);
 
-  writeFileSync(htmlPath, html);
-  console.log(`[review-helper] 生成完了: ${htmlPath}`);
+  // 原子的に書き込む（temp+rename）。serve配信中の画面は /api/state のmtime変化で即リロードするため、
+  // truncate-then-write だと書き込み途中の不完全なHTMLを配信し得る
+  const tempPath = `${htmlPath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, html);
+  renameSync(tempPath, htmlPath);
+  console.log(`[review-helper] 生成完了${draft ? "（暫定・解説なし）" : ""}: ${htmlPath}`);
   console.log(`  グループ: ${anno.groups.length} / hunk: ${diff.stats.hunks}（全hunk割り当て済みを検証OK）`);
+  if (draft) console.log(`  暫定画面です。annotations.json を書いて render を再実行すると、serve配信中の画面は自動で解説つきに更新されます`);
 
   if (!noOpen) openBrowser(htmlPath);
 }
@@ -819,26 +852,69 @@ function openBrowser(target: string) {
   else console.log(`  自動で開けませんでした。手動で開いてください: ${target}`);
 }
 
+/**
+ * review.html がまだ無いときに配信する「準備中」画面。
+ * /api/state をポーリングし、render完了（ready）で自動的にレビュー画面へ切り替わる。
+ * 安全要件（外部リソースなし・動的文字列の埋め込みなし）を満たす固定HTML。
+ */
+const LOADING_HTML = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>DIFF REVIEW — 準備中</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;color:#57606a;background:#f6f8fa">
+<div style="text-align:center">
+<p style="font-size:15px;font-weight:600">レビュー画面を準備しています…</p>
+<p style="font-size:12px">extract / render が完了すると自動で表示されます（このページの操作は不要です）</p>
+</div>
+<script>
+"use strict";
+(function poll() {
+  fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
+    if (s.ready) { location.reload(); return; }
+    setTimeout(poll, 1000);
+  }).catch(function () { setTimeout(poll, 1500); });
+})();
+</script></body></html>`;
+
 // ---------- serve ----------
 
 /**
  * review.html をローカル配信し、画面の「指摘を送信」（POST /api/comments）を受け付ける。
  * 受信した指摘は comments.json（受信箱）に保存し、標準出力にも出す。
- * --once: 最初の1件だけ受理して指摘を出力し終了する（エージェントが「人間の指摘待ち」をブロッキングで表現できる）。
- *         2件目以降のPOSTは409で拒否し、多重処理と受信箱の上書きを防ぐ。
+ * --once:  最初の1件だけ受理して指摘を出力し終了する（エージェントが「人間の指摘待ち」をブロッキングで表現できる）。
+ *          2件目以降のPOSTは409で拒否し、多重処理と受信箱の上書きを防ぐ。
+ * --fresh: serve起動後に書かれたreview.htmlのみ配信する（server-first起動用）。
+ *          前回レビューのreview.htmlが残っていても、新しいrenderまでは「準備中」画面に固定し、
+ *          古い差分を誤って見せない。
  */
 function serve(args: string[]) {
-  const { outDir } = repoPaths();
+  repoPaths(); // gitリポジトリ内であることを先に検証する（保存先自体はリクエストごとに解決）
   const noOpen = args.includes("--no-open");
   const once = args.includes("--once");
+  const fresh = args.includes("--fresh");
+  const startedAt = Date.now(); // --fresh: これより古いreview.htmlは「前回レビューの残骸」として配信しない
   const portIdx = args.indexOf("--port");
   const basePort = portIdx >= 0 ? Number(args[portIdx + 1]) : 4989;
   if (!Number.isInteger(basePort) || basePort <= 0 || basePort > 65535) die("--port には1〜65535の整数を指定してください");
 
-  const htmlPath = join(outDir, "review.html");
-  if (!existsSync(htmlPath)) die(`review.html がありません。先に render を実行してください: ${htmlPath}`);
-  const commentsPath = join(outDir, "comments.json");
-  const diffPath = join(outDir, "diff.json");
+  // server-first起動: review.html不在でも「準備中」画面を配信し、extract/render完了後に自動で切り替える。
+  // 保存先はリクエストごとに解決する（serve起動後のextractで参照先が変わっても追従する）。
+  const pathsNow = () => {
+    const dir = repoPaths().outDir;
+    return {
+      htmlPath: join(dir, "review.html"),
+      commentsPath: join(dir, "comments.json"),
+      diffPath: join(dir, "diff.json"),
+    };
+  };
+  // 配信可能なreview.htmlの状態。--fresh では serve起動後のrender成果物だけをreadyとみなす
+  const htmlState = (): { ready: boolean; mtime: number | null } => {
+    try {
+      const st = statSync(pathsNow().htmlPath);
+      const ready = !fresh || st.mtimeMs >= startedAt;
+      return { ready, mtime: ready ? st.mtimeMs : null };
+    } catch {
+      return { ready: false, mtime: null };
+    }
+  };
 
   let server: ReturnType<typeof Bun.serve> | null = null;
   let lastError: unknown = null;
@@ -852,9 +928,16 @@ function serve(args: string[]) {
           const url = new URL(req.url);
           if (req.method === "GET" && url.pathname === "/") {
             // 再render後のリロードで最新を反映できるよう、毎回ディスクから読む
-            return new Response(readFileSync(htmlPath, "utf-8"), {
+            if (!htmlState().ready) {
+              return new Response(LOADING_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+            }
+            return new Response(readFileSync(pathsNow().htmlPath, "utf-8"), {
               headers: { "content-type": "text/html; charset=utf-8" },
             });
+          }
+          if (req.method === "GET" && url.pathname === "/api/state") {
+            // 画面の自動更新用: 配信可能なreview.htmlの有無と更新時刻を返す（準備中画面・レビュー画面がポーリングする）
+            return Response.json(htmlState());
           }
           if (req.method === "POST" && url.pathname === "/api/comments") {
             // CSRF対策: 他サイト由来のPOSTを拒否（同一オリジンのみ許可。Originなし＝curl等は許可）
@@ -874,7 +957,7 @@ function serve(args: string[]) {
             // 古い画面からの誤送信ガード: 現行diff由来のstateKeyと一致しないPOSTは受理しない
             let expectedKey: string | null = null;
             try {
-              expectedKey = fnv1a(stableDiffJson(JSON.parse(readFileSync(diffPath, "utf-8")) as DiffDoc));
+              expectedKey = fnv1a(stableDiffJson(JSON.parse(readFileSync(pathsNow().diffPath, "utf-8")) as DiffDoc));
             } catch {
               // diff.jsonが無い/壊れている場合も受理しない
             }
@@ -887,6 +970,7 @@ function serve(args: string[]) {
               return Response.json({ error: "already-accepted" }, { status: 409 });
             }
             if (once) accepted = true;
+            const { commentsPath } = pathsNow();
             writeFileSync(commentsPath, JSON.stringify(body, null, 2));
             console.log(`\n[review-helper] 指摘を受信しました → ${commentsPath}`);
             console.log(`---- 指摘プロンプト ここから ----`);
@@ -909,10 +993,17 @@ function serve(args: string[]) {
 
   const url = `http://127.0.0.1:${server.port}/`;
   console.log(`[review-helper] レビューサーバ起動: ${url}`);
+  if (!htmlState().ready) {
+    console.log(
+      fresh
+        ? `  --fresh: serve起動後のrender完了まで「準備中」画面を配信します（前回のreview.htmlは表示しません）`
+        : `  review.html はまだありません。「準備中」画面を配信し、render完了後に自動で表示します`,
+    );
+  }
   console.log(
     once
       ? `  画面の「指摘を送信」を待っています。最初の1件を受理して終了します（以後のPOSTは409で拒否）`
-      : `  停止は Ctrl+C。受信した指摘は ${commentsPath} に保存されます`,
+      : `  停止は Ctrl+C。受信した指摘は ${pathsNow().commentsPath} に保存されます`,
   );
   if (!noOpen) openBrowser(url);
 }
@@ -932,12 +1023,17 @@ else {
       引数なし: 未コミット差分（HEAD比較）＋未追跡ファイル
       引数あり: そのまま git diff に渡す（例: main...feature, HEAD~3）
 
-  bun ${import.meta.path} render [--no-open]
+  bun ${import.meta.path} render [--draft] [--no-open]
       annotations.json を検証し、review.html を生成してブラウザで開く。
+      --draft: annotations.json なしで暫定画面（ファイル単位のグループ）を生成。
+               LLMの解説を待たずにdiffを先に確認できる。本renderで自動的に置き換わる。
 
-  bun ${import.meta.path} serve [--once] [--port N] [--no-open]
+  bun ${import.meta.path} serve [--once] [--fresh] [--port N] [--no-open]
       review.html をローカル配信し、画面の「指摘を送信」を受け付ける（受信箱: comments.json）。
-      --once: 最初の1件を受理して指摘を出力し終了。2件目以降は409で拒否。
+      review.html 不在でも起動でき、「準備中」画面を配信して render 完了後に自動で切り替える。
+      --once : 最初の1件を受理して指摘を出力し終了。2件目以降は409で拒否。
+      --fresh: serve起動後のrender成果物のみ配信（server-first起動用）。
+               前回レビューのreview.htmlが残っていても、新renderまで「準備中」に固定する。
 
 詳細は skills/review-helper/SKILL.md（エージェント向け手順書）と README.md を参照。`);
   process.exit(cmd ? 1 : 0);

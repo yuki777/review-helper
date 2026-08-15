@@ -149,6 +149,8 @@
   const LS_KEY = "review-helper:" + data.stateKey;
   // http(s)配信時のみ「エージェントに送信」ボタンを出す（file://ではコピーのみ）
   const SERVED = location.protocol === "http:" || location.protocol === "https:";
+  // 暫定画面（render --draft）: 解説なしのファイル単位表示。承認・送信は本注釈の完成後に有効化する
+  const DRAFT = !!data.draft;
 
   // ---------- 状態（承認・メモ）: diff内容のハッシュをキーにlocalStorageへ ----------
   let state = { approved: {}, memos: {}, lines: {}, contextMemo: "" };
@@ -894,9 +896,10 @@
         h("div", { class: "ghead-l" },
           h("span", { class: "chip risk " + gv.g.risk }, RISK[gv.g.risk].label),
           h("h3", {}, gv.g.title)),
-        h("label", { class: "approve" },
+        h("label", { class: "approve", title: DRAFT ? "解説（グループ分け）の完成後に承認できます" : null },
           h("input", {
             type: "checkbox",
+            disabled: DRAFT,
             checked: !!state.approved[gv.i],
             onchange: function (ev) {
               state.approved[gv.i] = ev.target.checked;
@@ -930,7 +933,8 @@
 
   document.title = anno.title + " — DIFF REVIEW";
   const app = document.getElementById("app");
-  app.append(
+  // 素の append() は null を文字列 "null" として描画してしまうため、条件付き要素はfilterで除く
+  app.append(...[
     h("header", { class: "topbar" },
       h("div", { class: "brand" }, "DIFF REVIEW"),
       h("div", { class: "title" }, anno.title),
@@ -945,7 +949,7 @@
         class: "copybtn", id: "copybtn", onclick: copyMemos,
         title: "全ての質問・指摘をプロンプトとしてクリップボードにコピーします（AIへは手動で貼り付け）",
       }),
-      SERVED ? h("button", {
+      SERVED && !DRAFT ? h("button", {
         class: "copybtn", id: "sendbtn", onclick: sendMemos,
         title: "serveが $XDG_DATA_HOME/review-helper/<review-id>/comments.json（受信箱）に保存します。serve --once で待機中のエージェントにはその場で渡ります。",
       }) : null,
@@ -957,6 +961,11 @@
         class: "copybtn", id: "htmlbtn", hidden: true, onclick: copyHtmlPath,
         title: "レビュー画面（review.html）のパスをコピーします。serve終了後もこのファイルをブラウザで開けば再閲覧できます。",
       }, "HTMLパスをコピー") : null),
+    DRAFT ? h("div", {
+      style: "background:#fff8c5;border-bottom:1px solid #d4a72c;padding:10px 24px;font-size:13px;color:#57606a",
+    }, "解説（グループ分け・意図・指摘）を生成中です。diff本文と統計は確定済みのため、先に確認できます。" +
+       (SERVED ? "完成すると画面は自動で更新されます" : "完成後の render でこの画面は解説つきに置き換わります（開き直してください）") +
+       "（メモ・行コメントは引き継がれます。承認・送信は完成後に有効になります）。") : null,
     contextSection(),
     h("section", { class: "sec" },
       h("h2", {}, "01 / 変更グループ一覧"),
@@ -965,10 +974,24 @@
       h("h2", {}, "02 / 変更グループ詳細"),
       groups.map(groupCard)),
     h("footer", {}, "review-helper / 状態キー: " + data.stateKey +
-      "（承認・メモはこのブラウザ内にのみ保存。diffが変わると自動リセット）"));
+      "（承認・メモはこのブラウザ内にのみ保存。diffが変わると自動リセット）"),
+  ].filter(function (x) { return x !== null; }));
 
   updateProgress();
   updateCopyBtn();
+
+  // serve配信時: renderがreview.htmlを更新したら自動リロードする（暫定→本注釈の切替、修正後の再render反映）。
+  // メモ・行コメントは入力のたびにlocalStorageへ保存済みのため、リロードで失われない。
+  if (SERVED) {
+    let baseMtime = null;
+    (function poll() {
+      fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
+        if (s.ready && baseMtime !== null && s.mtime !== baseMtime) { location.reload(); return; }
+        if (s.ready && baseMtime === null) baseMtime = s.mtime;
+        setTimeout(poll, DRAFT ? 1500 : 5000);
+      }).catch(function () { setTimeout(poll, 5000); });
+    })();
+  }
 })();
 </script>
 </body>
